@@ -7,8 +7,8 @@
 <p align="center"><em>Original CyOS. New hardware. Back on the air.</em></p>
 
 <p align="center">
-  <strong>v1.1026.2b (beta)</strong> · October 2026 ·
-  <a href="https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.2b">Linux &amp; Windows builds</a>
+  <strong>v1.1026.3b (beta)</strong> · October 2026 ·
+  <a href="https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.3b">Linux &amp; Windows builds</a>
 </p>
 
 <p align="center">
@@ -35,12 +35,12 @@ Three pieces:
 
 ## Get it
 
-**[v1.1026.2b release](https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.2b)** — ReBiko Desktop, CyOS included, no compiler. (These files were published before the rename, so they still carry the old name.)
+**[v1.1026.3b release](https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.3b)** — ReBiko Desktop, CyOS included, no compiler.
 
 | File | What |
 | --- | --- |
-| `cybiko-v1.1026.2b-linux-x64.zip` | Linux (`libsdl2`, `libpng`, X11) |
-| `cybiko-v1.1026.2b-windows-x64.zip` | Windows (SDL2 bundled) |
+| `rebiko-desktop-v1.1026.3b-linux-x64.zip` | Linux (`libsdl2`, `libpng`, X11) |
+| `rebiko-desktop-v1.1026.3b-windows-x64.zip` | Windows (SDL2 bundled) |
 
 Unzip. `./run.sh` or `run.bat`. Classic boot ROM and CyOS 1.2.46 are already in `roms/`.
 
@@ -207,7 +207,7 @@ Honest snapshot, 24 Oct 2026.
 | T-Deck volume 0–10, settings saved 10 s after a change | LoRa range (short on the first distance test) |
 | | Private messages, the people list and multiplayer games over the air |
 
-Chat over the air works now. The bench test is the PC on a Heltec and a T-Deck in Chat MAIN, 3 lines each way, and it passes 6/6. The v1.1026.2b download predates that fix, so its Chat doesn't work. The next release will carry it.
+Chat over the air works now. The bench test is the PC on a Heltec and a T-Deck in Chat MAIN, 3 lines each way, and it passes 6/6. v1.1026.3b is the first download with it; Chat in v1.1026.2b and earlier doesn't work.
 
 ---
 
