@@ -29,7 +29,7 @@ Three pieces:
 
 > Original guest. Modern hardware. Same cafeteria energy, slightly better RSSI.
 
-**Beta.** Testers welcome. Not a 1.0. The zip now includes Classic CyOS 1.2.46 so you can unzip and run. A git clone still does not — see [GETTING-ROMS.txt](GETTING-ROMS.txt). Xtreme dumps stay off the download.
+**1.0 beta.** Testers welcome. The zip now includes Classic CyOS 1.2.46 so you can unzip and run. A git clone still does not — see [GETTING-ROMS.txt](GETTING-ROMS.txt). Xtreme dumps stay off the download.
 
 ---
 
