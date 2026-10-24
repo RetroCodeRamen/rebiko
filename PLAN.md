@@ -1,4 +1,6 @@
-# Plan
+# Plan (Xtreme)
+
+> **This is the Xtreme plan, and it is paused.** Since 23 Oct 2026 the work has been on the Classic. [PLAN-V1.md](PLAN-V1.md) is the live plan, and Chat over LoRa works there. The shared pieces built here carry over to the Classic unchanged: items 3, 5 and 8, the radio boundary, the link codec, the SX1262 driver and the Heltec modem. The radio profile has changed since item 8 was written; it is now 500 kHz and 14 dBm with listen-before-talk (`ARCHITECTURE.md`).
 
 Ordered work for a T-Deck that boots original CyOS and speaks to a second T-Deck over LoRa. Each item has an acceptance check. "Host test" means it was run on this machine. "Hardware" means a T-Deck was flashed and observed. Hardware checks are open until that happens.
 
@@ -34,7 +36,8 @@ Ordered work for a T-Deck that boots original CyOS and speaks to a second T-Deck
    - **PC to T-Deck over the air, 23 Oct 2026:** `modem_tool --ping 1000` sent 34 link messages through the Heltec. The T-Deck counted rx 34, msgs 34, crc 0, link bad 0, RSSI -21 dBm, SNR 12, at 0 dBm across a desk.
    - **CyOS sends nothing until wireless is on** in `settings.dat` (`two_boot` pokes bytes 12, 13 and 41). An idle T-Deck at the desktop sent 0 packets in 100 s, which is expected.
    - **Shared-bus finding:** right after `tft.initDMA()` the Arduino SPI bus reads back 0 until the first DMA transfer completes, then it works again. The emulator draws a frame before the radio is pumped.
-   - **Still open:** a CyOS frame from the T-Deck received on the PC (T-Deck transmit is not yet seen over the air), then discovery and chat in both directions. Do not mark this done from the raw ping alone.
+   - **Still open on the XT:** a CyOS frame from the T-Deck received on the PC, then discovery and chat in both directions. Do not mark this done from the raw ping alone.
+   - **Done on the Classic, 23 Oct 2026:** Chat both ways, PC ↔ T-Deck, over this driver (PLAN-V1.md step 7).
 
 9. **App loading without a rebuild.** The host half is done: `cfs_read_file` returns the bytes `cfs_add_file` stored, and `test_cfs` round-trips a 400-byte `demo.app` plus a second small app. A bad page CRC fails the read. The firmware scans `/cybiko/apps/*.app` before boot and adds names that are not already in `/cybiko/save.nvram`. The T-Deck now mounts the card and boots CyOS. Still open: watching CyOS list an injected app. A copy of the Cybiko app library lives on this machine as `Apps/` (not in git). **Later, after radio:** a PC loader that picks titles from that library and writes them onto the card or into the guest filesystem over USB, including a V1 AT45 CFS writer. Do not build that until LoRa CyOS frames work.
 

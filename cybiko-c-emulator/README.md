@@ -1,5 +1,13 @@
 # Cybiko Xtreme Emulator
 
+> **In ReBiko** ([../README.md](../README.md)), this tree has three jobs:
+>
+> - It is the XT host core and its unit tests.
+> - It is the home of every radio source: the co-processor, SCI0/SCI2, the LoRa link, the SX1262 PHY and the Heltec serial PHY.
+> - It is the home of `two_boot`.
+>
+> Build with `make test` (the CMake path below is upstream's). The Classic PC emulator, ReBiko Desktop, is `../cybiko-lilygo/tools/v1_emu.c`. Below is the upstream README.
+
 A Cybiko Xtreme (XT) handheld computer emulator written in C, ported from my [Java implementation](https://github.com/daberkow/cybiko-java-emulator). Boots and runs CyOS with full CPU, display, audio, keyboard, and filesystem emulation.
 
 I wanted to try to port the emulator to get it running on embedded devices.

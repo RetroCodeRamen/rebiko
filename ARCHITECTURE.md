@@ -1,8 +1,13 @@
 # Architecture
 
-This workspace builds a native Cybiko emulator for the original LilyGO T-Deck (ESP32-S3, ST7789, SX1262). The guest is unmodified CyOS. LoRa is a transport under the emulated AVR radio co-processor, not a new Cybiko application.
+ReBiko runs unmodified CyOS on new hardware:
 
-The work order is in [PLAN.md](PLAN.md) (Xtreme) and [PLAN-V1.md](PLAN-V1.md) (Classic). The latest measured numbers are in [README.md](README.md) and [cybiko-lilygo/README.md](cybiko-lilygo/README.md#performance).
+- **ReBiko Pocket:** the original LilyGO T-Deck (ESP32-S3, ST7789, SX1262).
+- **ReBiko Desktop:** a PC, with a Heltec V3 running **ReBiko Radio** as its LoRa radio.
+
+LoRa is a transport under the emulated AVR radio co-processor, not a new Cybiko application. The Cybiko Classic (V1, CyOS 1.2.46) is the main machine. The Xtreme (XT, CyOS 1.5.08) is the second.
+
+The work order is in [PLAN-V1.md](PLAN-V1.md) (Classic) and [PLAN.md](PLAN.md) (Xtreme). The latest measured numbers are in [README.md](README.md) and [cybiko-lilygo/README.md](cybiko-lilygo/README.md#performance).
 
 ## Decision
 
@@ -16,9 +21,9 @@ The first wireless implementation is a small LoRa link that carries the same gue
 
 | Path | Role |
 |---|---|
-| `cybiko-c-emulator` | Host H8S core, unit tests, radio codec, `radio_sim`, SX1262 PHY, Heltec serial PHY, `two_boot`, SDL `--radio` |
-| `cybiko-lilygo` | T-Deck firmware. Vendored core (XT default, V1 env), display, keyboard, audio, SD, LoRa pump |
-| `cybiko-heltec-modem` | Heltec WiFi LoRa 32 V3. Same SX1262 PHY. SLIP to the PC emulator |
+| `cybiko-c-emulator` | Host H8S core (XT), unit tests, all radio sources (co-processor, SCI0/SCI2, link codec, `radio_sim`, SX1262 PHY, Heltec serial PHY), `two_boot` |
+| `cybiko-lilygo` | ReBiko Pocket firmware: vendored core (XT default, V1 env), display, keyboard, audio, SD, LoRa pump. Also ReBiko Desktop (`tools/v1_emu.c`) and the host V1 checks (`tools/v1_*.sh`), built against the vendored core |
+| `cybiko-heltec-modem` | ReBiko Radio: Heltec WiFi LoRa 32 V3, same SX1262 PHY, SLIP to the PC |
 
 The Java emulator (`cybiko-java-emulator-main` on this machine) is a local MIT reference for co-processor, SCI/DTC, and V1/XT/V2 behavior. It is not part of the GitHub repo.
 
@@ -54,7 +59,7 @@ CyOS never sees LoRa, UDP, or Reticulum. The boundary is the emulated AVR co-pro
 
 ```
 CyOS
-  → SCI2 TX / DTC (XT) or SCI0 (V1, not on the air yet)
+  → SCI2 TX / DTC (XT) or SCI0 (V1)
   → emulated AVR co-processor
   → cybiko_radio_transport_t        guest payload + channel
   → link codec                      fragment if the PHY needs it
@@ -70,7 +75,18 @@ CyOS
 - `send_packet(payload, channel)` is non-blocking. It copies bytes and returns.
 - A listener later receives `(payload, channel, sender CyID)`.
 - `pump()` is how the host moves packets. The CPU frame loop must not sit inside an SPI transfer or a LoRa airtime wait.
-- `set_channel()` records the channel CyOS selected. The transport does not drop on channel. CyOS hops between 2 and 4 while packets may still be in flight.
+- `set_channel()` records the channel CyOS selected. The transport does not filter by channel; the co-processor does (below).
+
+Byte 0 of every guest payload is `0xC0 | channel`. CyOS tunes with co-processor command `0x02`, and from then on `radio_coproc.c` drops frames for any other channel. This mirrors a real radio, and it is what keeps Chat rooms apart:
+
+| Channel | Used for |
+|---|---|
+| 2 | desktop |
+| 4 | Chat MAIN |
+| 6, 8, 10 | Romantic, Computers, Sports |
+| 52, 54 | Games, Music |
+
+CyOS retunes between these by itself as you move between screens.
 
 On transmit, the co-processor strips the 8-byte RF2915 preamble/CyID header. XT frames also drop the trailing status byte (51→42, 201→192). V1 frames have no trailing byte. Anything shorter than or equal to 9 bytes is an AVR command, not a packet, and is not transmitted.
 
@@ -89,9 +105,38 @@ Local `03` bytes are UART acknowledgements from the emulated AVR. They are not a
 
 XT `complete_tx_dtc` returns `32` for a small queued frame or an empty queue, and `C8` for a large frame. Poll (`30`) will not dequeue a payload longer than 50 bytes; that frame waits for scan (`CF`).
 
-The Java co-processor waits up to 15 ms inside `complete_tx_dtc`. That wait is not ported. A 192-byte chat payload plus the 16-byte link header is about 330 ms on the air at SF7/125 kHz/4/5; a 42-byte beacon is about 110 ms. Frames that arrive later are delivered by `try_async` when the guest radio is idle.
+The Java co-processor waits up to 15 ms inside `complete_tx_dtc`. That wait is not ported. A 192-byte chat payload plus the 16-byte link header is about 82 ms on the air at SF7/500 kHz/4/5; a 42-byte beacon is about 28 ms. Frames that arrive later are delivered by `try_async` when the guest radio is idle.
 
-The T-Deck XT image attaches the co-processor after the SX1262 starts. `CYBIKO_RADIO_TX=1` (set in `platformio.ini`) lets it transmit. Without that flag the board receives only. CyOS still sends nothing until Communications is on in `settings.dat`.
+The T-Deck attaches the co-processor after the SX1262 starts. `CYBIKO_RADIO_TX=1` (set in `platformio.ini`) lets it transmit. Without that flag the board receives only. CyOS sends nothing until wireless is on in its settings (`settings.dat`).
+
+### The Classic radio (SCI0)
+
+CyOS 1.2.46 schedules its own radio, and the emulator only has to model the hardware it uses:
+
+- **The scheduler.** Posting a job (`0x214A6C`) or finishing one calls the radio tick (`0x214760`) with a random back-off. The tick loads TCNT1 and enables OVIE, and TMR1's overflow interrupt calls the tick again, which starts TXI0.
+- **The bug that blocked Chat.** TMR overflow interrupts must be level-sensitive. OVF1 is set early in boot with OVIE off and never cleared, so an edge-only OVI meant CyOS's radio never ran. The Java emulator worked around that with a poll/scan "driver" that guessed at CyOS's RAM. That driver caused lost, late, echoed and junk Chat frames. It is gone, and must not come back.
+- **What `sci0_v1.c` does.** It models the UART, hands received frames to CyOS while its radio is idle, and keeps the CyID at `0x21F9DC` set to the radio id.
+
+Frames on the air are CyOS's own:
+
+| Frame | Type byte | Size |
+|---|---|---|
+| Presence | `0x00` | 42 bytes |
+| Chat room joins and messages | `0x20` / `0x28` | 42 or 192 bytes |
+
+CyOS sends each Chat message 3 times. Nicknames are CyOS's own (set on first boot, or in About Me).
+
+CyOS misses a key held under 10 frames now and then. The T-Deck queues typed keys: 12 frames down, then 3 up, or 10 up before the same key again. ReBiko Desktop holds each key at least 12 frames (`MIN_HOLD`).
+
+Host checks for the Classic, in `cybiko-lilygo/tools/`:
+
+| Script | What it checks |
+|---|---|
+| `v1_boot.sh` | One Classic boots, compared against Java's STATUS line |
+| `v1_two.sh` | Two Classics on `radio_sim` |
+| `v1_chat.sh` | Two Classics walk into Chat MAIN and each sees the other's line |
+
+`v1_airchat.c` predates the fix and still looks for the old type `0x01` beacons.
 
 ## Link layer and PHY
 
@@ -117,21 +162,25 @@ No transport ACK and no transport retry. CyOS is the protocol that retransmits. 
 
 `radio_lora.c` is the `cybiko_radio_transport_t` over any `radio_phy`. One fragment on the air at a time. Sends are rejected while transmit is gated off.
 
-There is no dedicated radio task. The T-Deck pumps the radio once per frame from the Arduino loop, and only when display DMA is idle. Right after `tft.initDMA()`, the Arduino SPI bus reads back 0 until the first DMA transfer; the emulator draws a frame before the first radio pump.
+Before each send, `sx1262_phy.cpp` listens before talking. It waits a random 0–30 ms. While a preamble or header is latched, it waits one longest packet plus a random amount, and gives up after 2 s. The T-Deck stats line counts these waits as `waited`, and the Heltec status line counts them as `wait`.
+
+There is no dedicated radio task. The T-Deck pumps the radio from the Arduino loop twice per frame, before and after `cybiko_run_frame`. If DIO1 is high (a packet is waiting) and display DMA is busy, it waits for the DMA to finish first. Right after `tft.initDMA()`, the Arduino SPI bus reads back 0 until the first DMA transfer; the emulator draws a frame before the first radio pump.
 
 Default profile:
 
 | Parameter | Value | Notes |
 |---|---|---|
 | Frequency | 915.0 MHz | US915 starting point. Not legal everywhere |
-| Bandwidth | 125 kHz | Chat fits in one packet at SF7 |
-| Spreading factor | 7 | Keeps airtime under a second |
+| Bandwidth | 500 kHz | Chat is ~82 ms on the air |
+| Spreading factor | 7 | |
 | Coding rate | 4/5 | |
-| Power | 0 dBm on the T-Deck and Heltec desk builds; 14 dBm is the header default | Desk range until the settings UI exists |
+| Power | 14 dBm | `CYBIKO_LORA_POWER_DBM`; bench builds may pass less |
 | Sync word | 0x1424 | Private LoRa, not LoRaWAN |
 | Preamble | 8 symbols | |
 
-The T-Deck CyID is `0x4C` plus the low 24 bits of its MAC, patched into flash the way the Java emulator patches `0x7F818`. The PC `--radio` path defaults to `0x4C000001`.
+The profile lives in `cybiko-c-emulator/src/radio/radio_transport.h` and is compiled into both the T-Deck and the Heltec. Change it, and flash both.
+
+The T-Deck CyID is `0x4C` plus the low 24 bits of its MAC. On the XT it is patched into flash, the way the Java emulator patches `0x7F818`. On the Classic, `sci0_v1.c` writes it to RAM at `0x21F9DC`. ReBiko Desktop defaults to `0x4C000001` (`--cyid`).
 
 ## Why not Reticulum as the first transport
 
@@ -165,21 +214,26 @@ Guest core
 
 Memory: emulator state, on-chip guest RAM, and boot ROM in internal SRAM; 2 MB (XT) guest RAM and the flash image in PSRAM. The 128 KB RGB565 buffer prefers internal DMA SRAM.
 
-Saves: XT writes `/cybiko/save.nvram` via `save.tmp` at 20 MHz SPI. A full 2 MB save was 2.3 s on the attached board. V1 writes the AT45 chip image to `/cybiko-v1/save.flash`.
+Saves go through `save.tmp` at 20 MHz SPI:
+
+- **XT:** writes `/cybiko/save.nvram` every 5 minutes, when it has changed. A full 2 MB save took 2.3 s on the attached board.
+- **V1:** writes the AT45 chip image to `/cybiko-v1/save.flash` 10 s after CyOS's last flash page write.
+
+Battery (V1): CyOS 1.2.46 stops idling on any real on-battery ADC reading (see [PLAN-V1.md](PLAN-V1.md#battery-gauge)). Its radio stops with it. So the guest always sees Java's charger values. The firmware patches out CyOS's low-battery icon, and shows the LiPo level in the T-Deck's own top bar instead.
 
 ## Machines
 
 Compile-time switch in `cybiko-lilygo/lib/cybiko_core/src/core/machine.h`. The XT is the default. V1 is `-DCYBIKO_MACHINE_V1` / PlatformIO env `T-Deck-Cybiko-V1`.
 
-| | XT (shipping path) | V1 Classic |
+| | XT | V1 Classic (main) |
 |---|---|---|
 | CPU clock | H8S/2323 @ 18.432 MHz | H8S/2241 @ 11.0592 MHz |
 | RAM | 2 MB @ 0x400000 | 512 KB @ 0x200000 |
 | Storage | memory-mapped flash + CFS in RAM | AT45DB041 on SCI1 |
-| Radio UART | SCI2 + DTC | SCI0 (not on the air yet) |
+| Radio UART | SCI2 + DTC | SCI0, interrupt-driven |
 | Card folder | `/cybiko/` | `/cybiko-v1/` |
 | Stride on device | 20 | 12 |
-| Hardware | boots CyOS 1.5.08 to home (~70 s) | firmware built; first on-device UI not yet observed |
+| Hardware | boots CyOS 1.5.08 to home (~70 s); CyOS frames over LoRa not tested | boots CyOS 1.2.46 at 60 fps; Chat over LoRa with ReBiko Desktop |
 
 The H8S takes no interrupt immediately after LDC/ANDC/ORC/XORC to CCR (`irq_hold`). CyOS's scheduler relies on that. Without it, boots freeze on the logo at some strides.
 
@@ -191,4 +245,10 @@ The H8S takes no interrupt immediately after LDC/ANDC/ORC/XORC to CCR (`irq_hold
 
 ## What this tree runs today
 
-See [README.md](README.md) for the latest run. In short: host tests and `two_boot` pass; the attached T-Deck boots XT CyOS at a held 60 fps; PC→T-Deck LoRa pings arrive; CyOS chat over LoRa is still open; V1 is a second firmware env, not yet a hardware UI result.
+See [README.md](README.md#status) for the latest run. In short:
+
+- Host tests, `two_boot` and `v1_chat.sh` pass.
+- The T-Deck runs the Classic at 60 fps.
+- Chat MAIN crosses between ReBiko Desktop (on a Heltec) and a T-Deck over LoRa, 6 of 6 lines both ways, and rooms stay apart.
+- Not yet tested over the air: two T-Decks, private messages, the people list, and games.
+- Range is short so far.

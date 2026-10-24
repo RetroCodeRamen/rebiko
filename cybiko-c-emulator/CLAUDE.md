@@ -9,10 +9,12 @@ Cybiko XT emulator ported from Java to C, targeting Linux (SDL2) and the origina
 - **Linux** (`src/linux/`): SDL2 frontend (display, keyboard, audio, `--radio`)
 - **Radio** (`src/radio/`): co-processor, link codec, `radio_sim`, SX1262 PHY, Heltec serial PHY, `two_boot`
 
+This is the XT host core. The Classic (V1) builds only from the T-Deck's vendored core (`../cybiko-lilygo/lib/cybiko_core`), and its host tools are `../cybiko-lilygo/tools/v1_*.sh`. The two cores have diverged. A fix to shared hardware (CPU, timers) belongs in both.
+
 ## Reference Implementations
 
-- **Java emulator** (`../cybiko-java-emulator/`): Original port source. Has known keyboard column bug (P on column 13).
-- **MAME** (`../mame/`): Older, incomplete XT support. Keyboard column definitions for XT are wrong (P on column 13 instead of column 9).
+- **Java emulator** (`../cybiko-java-emulator-main/`, local only, not in git): Original port source and the radio/SCI reference. Has known keyboard column bug (P on column 13).
+- **MAME** (not on this machine): Older, incomplete XT support. Keyboard column definitions for XT are wrong (P on column 13 instead of column 9).
 
 ## Keyboard Column Fix (Critical)
 
@@ -73,7 +75,13 @@ The `--app` flag injects `.app` files into the CFS filesystem before boot:
 
 ## Build
 
+This machine has no cmake; use the Makefile:
+
 ```bash
-cd build && cmake .. && cmake --build .
-./cybiko-emu <boot.bin> <flash.bin> [--nvram file.nvram] [--app file.app ...] [--trace]
+make test                 # unit tests, including test_radio and test_lora
+make harness              # radio link across a 64-byte PHY MTU
+make build/two_boot       # two XT CyOS instances chatting on radio_sim
+make build/cybiko-emu     # SDL frontend; --radio /dev/ttyUSB0 for a Heltec
+make build/modem_tool     # Heltec checks without CyOS
+./build/cybiko-emu <boot.bin> <flash.bin> [--nvram file.nvram] [--app file.app ...] [--trace] [--radio DEV] [--cyid HEX]
 ```

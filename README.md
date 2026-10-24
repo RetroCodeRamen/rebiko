@@ -196,16 +196,18 @@ The guest is unmodified CyOS. This is not a Cybiko-style rewrite. Design notes l
 
 ## Status
 
-Honest snapshot, 23 Oct 2026.
+Honest snapshot, 24 Oct 2026.
 
 | Have today | Still cooking |
 | --- | --- |
 | ReBiko Desktop on Linux and Windows | One-click flash pack with no PlatformIO |
 | Heltec auto-detect + ReBiko Radio OLED | CyOS app loader from the PC |
 | ReBiko Pocket (T-Deck Classic firmware) | XT battery on Port A |
-| PC ↔ T-Deck LoRa beacons / Nearby | Native Windows click-through window shape |
+| PC ↔ T-Deck Chat over LoRa, rooms kept apart | Native Windows click-through window shape |
+| T-Deck volume 0–10, settings saved 10 s after a change | LoRa range (short on the first distance test) |
+| | Private messages, the people list and multiplayer games over the air |
 
-A passing `make test` is not a hardware result. A LoRa ping is not CyOS chat. Both of those have happened here; chat over the air is the thing we keep chasing.
+Chat over the air works now. The bench test is the PC on a Heltec and a T-Deck in Chat MAIN, 3 lines each way, and it passes 6/6. The v1.1026.2b download predates that fix, so its Chat doesn't work. The next release will carry it.
 
 ---
 
@@ -219,7 +221,7 @@ A passing `make test` is not a hardware result. A LoRa ping is not CyOS chat. Bo
 | `/cybiko/apps/*.app` | Injected into that save before boot if the name is new |
 | `/cybiko-v1/boot.bin` | Classic boot ROM (`cyrom112.bin`) |
 | `/cybiko-v1/flash.bin` | CyOS 1.2.46 (`flash_v1246.bin`) |
-| `/cybiko-v1/save.flash` | AT45DB041 image |
+| `/cybiko-v1/save.flash` | AT45DB041 image, written 10 s after CyOS's last change |
 
 Classic dumps ride along in the zip. They stay out of git. XT dumps and `.app` files stay off both.
 

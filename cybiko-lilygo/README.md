@@ -1,12 +1,17 @@
-# Cybiko Xtreme Emulator for LilyGo T-Deck
+# ReBiko Pocket
 
 ![CyOS running on a LilyGo T-Deck](tdeck-small.jpg)
 
-> Original upstream note: 13–20 fps on the ESP32-S3. That figure is obsolete. On the attached original T-Deck this tree holds 60 fps (frame-limited) through CyOS 1.5.08 boot; see Performance.
+ReBiko Pocket is the T-Deck firmware of [ReBiko](../README.md): an original LilyGo T-Deck (ESP32-S3, ST7789, keyboard at I2C 0x55) that runs the original CyOS and is a Cybiko. The T-Deck's SX1262 carries the Cybiko radio over LoRa, so it chats with other ReBiko Pockets and with ReBiko Desktop on a PC with a Heltec.
 
-A Cybiko Xtreme (XT) handheld computer emulator for the original LilyGo T-Deck (ESP32-S3, ST7789, keyboard at I2C 0x55). T-Deck Pro is e-paper with a different pinout and is not the target. The pin definitions in `tdeck_pins.h` match the original T-Deck. This tree boots CyOS with display, audio, keyboard, filesystem, and the SX1262 as the radio transport under the emulated AVR co-processor. A second env, `T-Deck-Cybiko-V1`, builds the Classic (see `../PLAN-V1.md`).
+Two builds:
 
-The Cybiko XT was a wireless handheld computer from the early 2000s built around the Hitachi H8S/2323 CPU with a 160x100 grayscale LCD. This project emulates that hardware in C and runs the original CyOS firmware on the T-Deck's ESP32-S3, using its keyboard, display, trackball, and speaker.
+- **`T-Deck-Cybiko-V1`: the Cybiko Classic**, CyOS 1.2.46. This is the main one. Chat works over the air with ReBiko Desktop.
+- **`T-Deck-Cybiko`: the Cybiko Xtreme**, CyOS 1.5.08. This is the PlatformIO default.
+
+The T-Deck Pro is e-paper with a different pinout and is not a target. The pins in `tdeck_pins.h` are the original T-Deck's.
+
+The Cybiko was a wireless handheld from 2000–2001, built around a Hitachi H8S/2323 CPU with a 160x100 grayscale LCD. This firmware emulates that hardware in C and runs CyOS on the ESP32-S3, using the T-Deck's keyboard, display, trackball and speaker.
 
 ## Hardware
 
@@ -21,22 +26,25 @@ The Cybiko XT was a wireless handheld computer from the early 2000s built around
 - [PlatformIO](https://platformio.org/) (CLI or VS Code extension)
 - A LilyGo T-Deck (original, not Pro)
 - A MicroSD card
-- Cybiko XT ROM files: `boot.bin` and `flash.bin`
+- CyOS ROM files for the model you build (below)
 
 ## Setup
 
 ### 1. Prepare the SD card
 
-Create a `/cybiko/` folder on the SD card and copy in your ROM files:
+ROMs are not in git. The ReBiko Desktop release zip carries the Classic ones in `roms/`; see [GETTING-ROMS.txt](../GETTING-ROMS.txt).
 
 ```
 SD card root/
-  cybiko/
+  cybiko-v1/          Classic
+    boot.bin          cyrom112.bin
+    flash.bin         flash_v1246.bin (CyOS 1.2.46)
+  cybiko/             Xtreme
     boot.bin
     flash.bin
 ```
 
-ROMs are not included in this repo. You need the Cybiko XT v1.5.08 firmware dumps:
+The Xtreme needs the CyOS 1.5.08 dumps:
 
 | SD card name | Original filename | Size | SHA-256 |
 |---|---|---|---|
@@ -48,34 +56,42 @@ Insert the SD card into the T-Deck.
 ### 2. Build and flash
 
 ```bash
-git clone <this-repo-url>
-cd cybiko-lilygo
+# Classic
+pio run -t upload -e T-Deck-Cybiko-V1
 
-# Build
-pio run
-
-# Build and upload to T-Deck
+# Xtreme (the default env)
 pio run -t upload
 
-# Open serial monitor to see boot logs and FPS
+# Serial log: fps, radio counters, saves
 pio run -t monitor
 ```
 
-PlatformIO will automatically fetch dependencies (TFT_eSPI, etc.) on first build. No additional setup is needed.
+PlatformIO fetches TFT_eSPI and the other dependencies on the first build. Every ReBiko Pocket and ReBiko Radio has to run the same radio profile; when it changes, flash them all.
 
 ## Usage
 
-Once flashed, the T-Deck boots directly into CyOS. The serial monitor (115200 baud) prints fps, guest instructions per second, and frame-limiter headroom every 5 seconds (see Performance).
+The T-Deck boots straight into CyOS. On first boot, CyOS asks for a nickname.
 
-**Keyboard (XT):** The T-Deck's QWERTY keyboard maps to the Cybiko's keyboard matrix. Letters, Enter, Space, Backspace, Tab, and Escape work directly. Numbers are entered via Fn+letter combinations (same as the original Cybiko). The V1 env maps digits directly.
+**Keyboard:** Letters, digits, Enter, Space and Backspace go straight to CyOS. The T-Deck has no Esc or function keys, so `$` starts a command. The top line shows the `$` marker while one is pending:
 
-**Trackball:** Maps to the Cybiko's directional pad. Center click is Enter (`col 4`, `0x0008`), not Select. Select does not open an icon.
+| Keys | Cybiko key |
+|---|---|
+| `$` `x` | Esc |
+| `$` `h` | Help |
+| `$` `q` … `u` | F1 … F7 |
+| `$` `s` / `i` / `d` / `g` | Select / Insert / Delete / Tab |
+| `$` `$` | A `$` |
+| `$` `p` / `m` | Volume up / down |
 
-**NVRAM:** XT emulator state is auto-saved to `/cybiko/save.nvram` via `save.tmp` every 5 minutes (only when data has changed). SD SPI is 20 MHz.
+Volume has 11 levels, 0 (off) to 10 (100%). After `$p` or `$m`, more `p` and `m` presses keep stepping it for 2 seconds after each press: `$ m m m` is three levels down. Any other key ends volume mode and is typed normally. The level is kept in the ESP32's NVS.
 
-**Radio:** After the SX1262 starts, the firmware attaches the guest co-processor and pumps the LoRa transport once per frame when display DMA is idle. Default: 915 MHz, SF7, 125 kHz, 0 dBm, `CYBIKO_RADIO_TX=1`. CyOS still sends nothing until Communications is on in `settings.dat`. The PC side is `../cybiko-heltec-modem/` plus `cybiko-emu --radio`.
+Each typed key is held for 12 frames, then released for 3 before the next one, or for 10 if it is the same key again. CyOS 1.2.46 misses shorter presses.
 
-**Classic (V1):** `pio run -e T-Deck-Cybiko-V1` with `/cybiko-v1/boot.bin` and `flash.bin` on the card. First on-device UI is still open; see `../PLAN-V1.md`.
+**Trackball:** The Cybiko's d-pad. A click is Enter. Holding the click for 600 ms is Esc.
+
+**Saves:** The Classic writes CyOS's flash chip to `/cybiko-v1/save.flash` 10 s after CyOS's last write to it. That covers your nickname, settings and files. The Xtreme saves RAM to `/cybiko/save.nvram` every 5 minutes, when it has changed. Both are written to `save.tmp` first and then renamed. SD SPI runs at 20 MHz.
+
+**Radio:** The SX1262 sits under the emulated radio co-processor. It runs at 915 MHz, SF7, 500 kHz, 14 dBm, with listen-before-talk. CyOS's own radio code runs unchanged. Chat rooms are radio channels, and the co-processor hears only the channel CyOS tuned. CyOS transmits nothing until wireless is on in its settings. On the PC side, ReBiko Desktop (`tools/v1_emu.c`) uses a Heltec running ReBiko Radio (`../cybiko-heltec-modem/`).
 
 ## Project Structure
 
@@ -86,8 +102,10 @@ cybiko-lilygo/
     radio_sx1262.*    # SX1262 transport wrapper
     tdeck_pins.h      # Hardware pin definitions (original T-Deck)
   tools/
-    host_bench.sh     # Host build + RAM/LCD hash check of the vendored core
+    v1_emu.c / .sh    # ReBiko Desktop, the PC Classic (SDL)
+    v1_chat.sh        # Two Classics on the host walk into Chat and swap lines
     v1_boot.sh        # V1 host STATUS line vs Java
+    host_bench.sh     # Host build + RAM/LCD hash check of the vendored core
     capture_serial.py # Timestamped serial log for a fixed time
   lib/
     cybiko_core/      # Emulator core (vendored from cybiko-c-emulator)
@@ -100,7 +118,7 @@ The emulator core (`lib/cybiko_core/`) is platform-independent C and communicate
 
 ## Performance
 
-Measured on an original T-Deck (ESP32-S3, 240 MHz) on 22 Oct 2026, booting CyOS 1.5.08 from the card. The serial log prints one line every 5 s:
+These numbers are for the Xtreme build. The Classic holds 60 fps from power-on at stride 12. They were measured on an original T-Deck (ESP32-S3, 240 MHz) on 22 Oct 2026, booting CyOS 1.5.08 from the card. The serial log prints one line every 5 s:
 
 ```
 60.0 fps (100%)  922 kIPS  232 cyc/insn  sleep 0%  core 4461 ms  render 22 ms  idle 526 ms

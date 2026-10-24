@@ -1,5 +1,13 @@
 # Plan: Cybiko Classic (V1) on the T-Deck
 
+**Where it stands, 24 Oct 2026:**
+
+- Steps 1–4, 6 and 7 are done.
+- From step 5, persistence works on the T-Deck. `.app` injection is still open.
+- Chat runs over LoRa between ReBiko Desktop and a T-Deck.
+
+What is left is under [Open](#open). The plan below keeps its original text and adds the results.
+
 Written 22 Oct 2026 from the Java reference (`cybiko-java-emulator-main`), the C core (`cybiko-c-emulator`, `cybiko-lilygo/lib/cybiko_core`), and one headless Java V1 run on this machine.
 
 ## Why V1, not V2
@@ -101,23 +109,36 @@ Sizes are rough: S is under a day, M is 1–3 days, and L is a week or more of i
 5. **Persistence and apps (M). Persistence done on the T-Deck; app injection open.** Write the SPI flash image back to the card when it changes, the way `save.nvram` works now. Add an AT45 CFS writer (264-byte pages, CRC32) so `/cybiko/apps/*.app` can be injected for V1. The XT CFS writer stays.
    *Acceptance:* the host round-trips a 400-byte `.app` through the V1 writer. A setting changed in CyOS survives a host restart.
    *Status:*
-   - The T-Deck saves the whole 540672-byte chip as `/cybiko-v1/save.flash` when `at45db041_t.writes` has changed, and boots from it in place of `flash.bin`. Deleting it resets the machine.
-   - Not yet verified on hardware. The AT45 CFS writer for `.app` injection is not written.
+   - The T-Deck saves the whole 540672-byte chip as `/cybiko-v1/save.flash`, and boots from it in place of `flash.bin`. Deleting the file resets the machine.
+   - The save happens 10 s after the last change to `at45db041_t.writes`, and a failed save retries 10 s later.
+   - Verified on hardware, 24 Oct 2026: Mute changed in CyOS Settings was saved 11 s later and survived a reset.
+   - The AT45 CFS writer for `.app` injection is not written.
 
-6. **T-Deck V1 firmware (S–M). Built and flashed 23 Oct 2026; first boot not yet observed.** A second PlatformIO env, `T-Deck-Cybiko-V1`, with card paths under `/cybiko-v1/` and a V1 keymap. Digits map directly, since V1 has number keys.
+6. **T-Deck V1 firmware (S–M). Done 23 Oct 2026.** A second PlatformIO env, `T-Deck-Cybiko-V1`, with card paths under `/cybiko-v1/` and a V1 keymap. Digits map directly, since V1 has number keys.
    *Acceptance on hardware:* boots to the UI from the card, the serial log shows fps, kIPS, and `idle`, and power-on to UI time is recorded.
    *Status:*
    - `pio run -e T-Deck-Cybiko-V1`: `CYBIKO_MACHINE_V1`, stride 12, card folder `/cybiko-v1/`. Stride 8 fell to ~50 fps under load; 12 holds 60 fps on the host arithmetic and is what `platformio.ini` ships.
    - Leaves out the XT CyID patch, `.app` injection, and the SCI2 co-processor.
    - Keymap: `tdeck_keymap.c` has a V1 table from the Java V1 matrix, plain keys and digits only. Backspace is the Del position, as in Java.
+   - On hardware: boots CyOS 1.2.46 from the card and holds 60 fps.
+   - `$` commands give Esc, Help, F1–F7 and volume (see `cybiko-lilygo/README.md`).
+   - Typed keys are queued taps that CyOS cannot miss.
 
-7. **V1 radio (L, highest risk).** Port the SCI0 interrupt-driven path, then the Java V1 driver layer. That layer is a set of workarounds tied to CyOS 1.2.46 RAM addresses:
-   - It bootstraps `connObj` by injecting `0x03`.
-   - It drives poll and scan every 15 frames, because "CyOS never calls the tick function."
-   - It restores `connObj` each cycle and patches the CyID at `0x21F9DC`.
-   - It resolves the RF service at `0x223186`.
+7. **V1 radio (L, highest risk). Done 23–24 Oct 2026.** The plan was to port the SCI0 interrupt-driven path, then the Java V1 driver layer. That layer was a set of workarounds tied to CyOS 1.2.46 RAM addresses:
+   - It bootstrapped `connObj` by injecting `0x03`.
+   - It drove poll and scan every 15 frames, because "CyOS never calls the tick function."
+   - It restored `connObj` each cycle and patched the CyID at `0x21F9DC`.
+   - It resolved the RF service at `0x223186`.
 
    *Acceptance:* two host V1 instances chat (a V1 `two_boot`), then V1↔XT on the sim bus, then over LoRa with the SX1262 driver from `PLAN.md` item 8.
+
+   *Result:*
+   - **The driver layer was not needed.** CyOS does call its tick, from TMR1's overflow interrupt. The C and Java `timer8` raised OVI only on a 0→1 edge of OVF, and OVF1 is already set when CyOS enables it.
+   - **The fix.** With a level-sensitive OVI, CyOS runs its own radio. `sci0_v1.c` keeps only the UART, async RX while CyOS's radio is idle, and the CyID. `ARCHITECTURE.md` has the details.
+   - **Host test.** `tools/v1_chat.sh` passes: two Classics in Chat MAIN, each sees the other's line.
+   - **Over LoRa.** ReBiko Desktop on a Heltec ↔ T-Deck passes 6 of 6, 3 lines each way, including both sides sending within 0.1 s.
+   - **Rooms.** Rooms are radio channels, and the co-processor drops frames off the tuned channel, so rooms stay apart.
+   - **Not tested:** V1↔XT, two T-Decks over the air, private messages and games.
 
 ## Battery gauge (investigated 23 Oct 2026)
 
@@ -143,8 +164,11 @@ The owner asked for the T-Deck battery to drive the Classic's gauge.
 - The Java emulator does the same with the same values (`-Dadc1=396 -Dadc2=396` on a patched copy), so it is a gap common to both emulators, not a C-port bug.
 - Levels 36–39 idle normally with the blinking low icon.
 - Port 1 (0xFFFF50) and ADC channel 0 have no effect on it.
-- **Until it is found,** the T-Deck keeps Java's charger values. `cybiko_set_adc()` exists for the passthrough.
-- **Passthrough plan:** charger mode while the T-Deck is on USB, and on battery `ch1 = ch2 = 341 + level`, with level from the LiPo voltage mapped onto 31–78.
+- **What ships (24 Oct 2026):** the guest always gets Java's charger values. It has to: with on-battery values CyOS also stops sending on the radio.
+  - The firmware patches CyOS's two `CMP.W #42` low-icon checks (`0x25B760`, `0x25B7CE`) to 0, so CyOS's battery icon stays off.
+  - The T-Deck's own top bar shows the LiPo level.
+  - `cybiko_set_adc()` is there for a real passthrough if the idle bug is ever found.
+- **The passthrough plan,** if that bug is fixed: charger mode while the T-Deck is on USB. On battery, `ch1 = ch2 = 341 + level`, with level from the LiPo voltage mapped onto 31–78.
 
 ## Risks and open questions
 
@@ -156,7 +180,18 @@ The owner asked for the T-Deck battery to drive the Classic's gauge.
   - **After the fix:** strides 8–16 all boot and answer key presses, and stride 12 does in 8 of 8 timing variants.
   - **Effect on the XT:** it boots to its welcome screen, but its host-bench hashes changed; the new values are the baseline.
 
-- **The V1 radio driver is a workaround layer, not hardware emulation.** On a real Cybiko something does call that tick function. It is most likely an interrupt or co-processor behavior the emulators do not model. Finding it could replace the address-specific workarounds; failing that, the port depends on CyOS 1.2.46 exactly.
-- **C-port gaps.** The C CPU was ported from Java and only XT CyOS has run on it. V1 CyOS may use instructions or flag paths the XT never did. Step 4 is where these show up.
-- **Speed is unmeasured.** The 40% cycle reduction is arithmetic. Step 6 gives the real figure.
-- **The XT stays.** Its radio work, `two_boot`, and the hash checks remain the regression net for every step.
+- **The V1 radio driver was a workaround layer: resolved 23 Oct 2026.** The missing tick was TMR1's overflow interrupt (step 7). Nothing in the radio path depends on CyOS 1.2.46 RAM addresses now except the CyID at `0x21F9DC`.
+- **C-port gaps.** None showed up in step 4.
+- **The XT stays.** Its radio work, `two_boot`, and the hash checks remain the regression net for every core change.
+
+## Open
+
+- **Range.** The first distance test came out short at 14 dBm / 500 kHz. Look at the antennas, the bandwidth (125 kHz gains about 6 dB) and the power, keeping airtime in mind.
+- **More of CyOS over the air:**
+  - two T-Decks;
+  - private messages;
+  - the people list;
+  - multiplayer games (airtime, latency, frames over 255 bytes).
+- **`.app` loading** for the Classic: the AT45 CFS writer (step 5), then a PC loader.
+- **Internet relay** (`PLAN-RELAY.md`, not in git). This is on hold.
+- **Battery passthrough:** blocked on the idle bug above.

@@ -58,7 +58,7 @@ Cybiko LCD (160x100 grayscale) → 256-entry grayscale-to-RGB565 LUT → 2x near
 
 ### Keyboard Pipeline
 
-T-Deck keyboard (I2C ASCII, drained by its own task) → `process_ascii_key()` maps to Cybiko matrix positions → typed keys are queued taps, one at a time: held 12 frames, then all keys up for 3 frames before the next. CyOS 1.2.46 misses a key held under 10 frames now and then, and a second tap of a key that is still down would only lengthen it ("ll" became "l"). `tools/v1_chat.sh` measured both.
+T-Deck keyboard (I2C ASCII, drained by its own task) → `process_ascii_key()` maps to Cybiko matrix positions → typed keys are queued taps, one at a time: held 12 frames, then all keys up for 3 frames before the next (10 if it is the same key again). CyOS 1.2.46 misses a key held under 10 frames now and then, and a second tap of a key that is still down would only lengthen it ("ll" became "l"). `tools/v1_chat.sh` measured both.
 
 ### SD Card Layout
 
