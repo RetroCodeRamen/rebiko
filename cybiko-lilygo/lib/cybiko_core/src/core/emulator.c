@@ -301,8 +301,9 @@ static void tick_timers_batch(cybiko_emu_t *emu, int cycles, int frame_cycle) {
 }
 
 #ifdef CYBIKO_SPLIT_PROFILE
-/* Host cycles in the active path: [0] timers, [1] CPU, [2] instructions */
-uint32_t cybiko_split[3];
+/* Host cycles: [0] active-path timers, [1] CPU, [2] instructions,
+ * [3] the SLEEP fast-forward, [4] its batches */
+uint32_t cybiko_split[5];
 #endif
 
 void cybiko_run_frame(cybiko_emu_t *emu) {
@@ -349,6 +350,9 @@ void cybiko_run_frame(cybiko_emu_t *emu) {
          * Post-boot this skips 60-90% of cycles (CyOS idle loop).
          */
         if (emu->cpu.halted) {
+#ifdef CYBIKO_SPLIT_PROFILE
+            uint32_t s0 = XTHAL_GET_CCOUNT();
+#endif
             while (cycle < CYBIKO_CYCLES_PER_FRAME && emu->cpu.halted) {
                 if (emu->cpu.pending_irq_count > 0) {
                     /* Interrupt pending — wake CPU via step */
@@ -364,7 +368,13 @@ void cybiko_run_frame(cybiko_emu_t *emu) {
 #endif
                 cycle += batch;
                 emu->sleep_cycles += (uint64_t)batch;
+#ifdef CYBIKO_SPLIT_PROFILE
+                cybiko_split[4]++;
+#endif
             }
+#ifdef CYBIKO_SPLIT_PROFILE
+            cybiko_split[3] += XTHAL_GET_CCOUNT() - s0;
+#endif
             continue;
         }
 
@@ -528,6 +538,10 @@ const uint8_t *cybiko_get_vram(const cybiko_emu_t *emu) {
 
 uint32_t cybiko_get_pc(const cybiko_emu_t *emu) {
     return emu->cpu.pc;
+}
+
+uint32_t cybiko_lcd_serial(const cybiko_emu_t *emu) {
+    return emu->lcd.serial;
 }
 
 bool cybiko_lcd_on(const cybiko_emu_t *emu) {

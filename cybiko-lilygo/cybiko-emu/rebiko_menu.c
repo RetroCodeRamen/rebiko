@@ -3,13 +3,14 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { OP_NONE, OP_RESTORE_KEYS, OP_RESTORE_ALL, OP_RESTART, OP_ASSIGN, OP_RESTORE_TARGET };
+enum { OP_NONE, OP_RESTORE_KEYS, OP_RESTORE_ALL, OP_RESTART, OP_ASSIGN, OP_RESTORE_TARGET,
+       OP_SWITCH };
 
 enum { MAIN_CONTROLS, MAIN_PERF, MAIN_DISPLAY, MAIN_AUDIO, MAIN_SYSTEM, MAIN_RETURN, MAIN_ROWS };
 enum { TGT_INPUTS, TGT_CHANGE, TGT_ADD, TGT_CLEAR, TGT_RESTORE, TGT_ROWS };
 enum { DISP_LIGHT, DISP_SCALE, DISP_SLEEP, DISP_ROWS };
 enum { AUD_SOUND, AUD_VOLUME, AUD_ROWS };
-enum { SYS_VERSION, SYS_INFO, SYS_KEYREF, SYS_LINK, SYS_DEFAULTS, SYS_RESTART,
+enum { SYS_VERSION, SYS_MACHINE, SYS_INFO, SYS_KEYREF, SYS_LINK, SYS_DEFAULTS, SYS_RESTART,
        SYS_RETURN, SYS_ROWS };
 
 #define WANT(buf, n, ...) do { if (buf && n) snprintf(buf, n, __VA_ARGS__); } while (0)
@@ -210,6 +211,10 @@ bool rb_menu_row(const rb_menu_t *m, int i, char *label, size_t ln, char *value,
             WANT(label, ln, "Version");
             WANT(value, vn, "%s", m->hooks.version ? m->hooks.version : "?");
             return false;
+        case SYS_MACHINE:
+            WANT(label, ln, "Machine");
+            WANT(value, vn, "%s >", m->hooks.machine ? m->hooks.machine : "?");
+            return m->hooks.switch_machine != NULL;
         case SYS_INFO:     WANT(label, ln, "Hardware info"); WANT(value, vn, ">"); return true;
         case SYS_KEYREF:   WANT(label, ln, "Key reference"); WANT(value, vn, ">"); return true;
         case SYS_LINK:
@@ -367,6 +372,15 @@ static void do_confirm(rb_menu_t *m) {
         restore_target(m);
         pop(m);
         break;
+    case OP_SWITCH: {
+        char a[48];
+        pop(m);
+        /* returns only when the other model isn't installed */
+        m->hooks.switch_machine(m->hooks.ctx, &m->cfg);
+        snprintf(a, sizeof a, "The %s isn't installed.", m->hooks.other_machine);
+        message(m, a, "tools/flash_both.sh puts both on.");
+        break;
+    }
     }
     m->confirm_op = OP_NONE;
 }
@@ -439,6 +453,11 @@ static void select_row(rb_menu_t *m, int row) {
     case RB_SCR_SYSTEM:
         if (row == SYS_INFO) push(m, RB_SCR_INFO);
         else if (row == SYS_KEYREF) push(m, RB_SCR_KEYREF);
+        else if (row == SYS_MACHINE && m->hooks.switch_machine) {
+            char q[48];
+            snprintf(q, sizeof q, "Switch to the %s?", m->hooks.other_machine);
+            confirm(m, OP_SWITCH, q, "Settings and CyOS's data are", "saved, then ReBiko restarts.");
+        }
         else if (row == SYS_DEFAULTS)
             confirm(m, OP_RESTORE_ALL, "Restore all defaults?",
                     "Keys, CPU, display and audio.", "CyOS files are kept.");

@@ -1764,6 +1764,70 @@ static inline __attribute__((always_inline)) void decode(h8s_cpu_t *cpu, uint16_
     }
 }
 
+/*
+ * Native boot ROM loops shared by the Classic (cyrom112) and the Xtreme
+ * (cyrom150), whose ROMs carry the same code at different addresses.
+ * Each is guarded by its exact code bytes, runs every pass but the last,
+ * and leaves the CPU at the loop with the registers, memory and flags its
+ * own passes would have left (tests/hle_verify.sh checks every call).
+ *
+ * memset: ER3 = dst, R1L = value, ER2 = count.
+ *   code: MOV.B R1L,@ER3 / ADDS #1,ER3 / hook: SUBS #1,ER2 / MOV.L ER2,ER2
+ *         BGE code
+ */
+#if CYBIKO_HAS_SPI_FLASH
+#define HLE_MEMSET_CODE 0x001744
+#define HLE_FILL_LOOP   0x003A26
+#define HLE_BLIT_LOOP   0x0049C0
+#define HLE_SHCOPY_LOOP 0x004104
+#define HLE_SHR_LOOP    0x0049AA
+#define HLE_LCD_ROW_LOOP 0x206FA0   /* CyOS 1.2.46, in RAM */
+#define HLE_LCD_PORT_REG 1
+#else
+#define HLE_MEMSET_CODE 0x001200
+#define HLE_FILL_LOOP   0x0020C2
+#define HLE_BLIT_LOOP   0x00305C
+#define HLE_SHCOPY_LOOP 0x0027A0
+#define HLE_SHR_LOOP    0x003046
+#define HLE_LCD_ROW_LOOP 0x4AE0C8   /* CyOS 1.5.08, in RAM */
+#define HLE_LCD_PORT_REG 0
+#endif
+#define HLE_MEMSET_LOOP (HLE_MEMSET_CODE + 4)
+static const uint8_t hle_memset_code[] = {
+    0x68,0xB9,0x0B,0x03,0x1B,0x02,0x0F,0xA2,0x4C,0xF6 };
+
+static bool plain_ram(uint32_t a, uint32_t n) {
+    return (EXT_RAM_HIT(a) && EXT_RAM_HIT(a + n - 1)) ||
+           (ON_CHIP_HIT(a) && ON_CHIP_HIT(a + n - 1));
+}
+
+static uint8_t *plain_ptr(address_bus_t *bus, uint32_t a) {
+    return EXT_RAM_HIT(a) ? bus->external_ram.data + EXT_RAM_OFF(a)
+                          : bus->on_chip_ram.data + ON_CHIP_OFF(a);
+}
+
+static uint32_t hle_passes;      /* passes the last native call ran (for the verifier) */
+
+static bool H8S_HOT hle_memset(h8s_cpu_t *cpu) {
+    int32_t left = (int32_t)cpu->er[2];          /* bytes still to write */
+    if (left < 2 || left > 0x80000)
+        return false;
+    if (memcmp(cpu->bus->boot_rom.data + HLE_MEMSET_CODE, hle_memset_code, sizeof hle_memset_code) != 0)
+        return false;
+    uint32_t dst = cpu->er[3] & 0xFFFFFF, k = (uint32_t)left - 1;
+    if (!plain_ram(dst, k))
+        return false;
+    memset(plain_ptr(cpu->bus, dst), (uint8_t)cpu->er[1], k);
+    cpu->er[3] += k;
+    cpu->er[2] -= k;                             /* 1: the CPU does the last */
+    /* a pass ends MOV.B R1L,@ER3 / ADDS: N and Z from R1L, V=0 */
+    uint8_t v = (uint8_t)cpu->er[1];
+    cpu->ccr = (uint8_t)((cpu->ccr & ~(CCR_N | CCR_Z | CCR_V)) |
+                         ((v & 0x80) ? CCR_N : 0) | (v ? 0 : CCR_Z));
+    hle_passes = k;
+    return true;
+}
+
 #if CYBIKO_HAS_SPI_FLASH
 /*
  * CyOS 1.2.46 checks the CRC-32 of every flash page at boot, a byte at a
@@ -1819,70 +1883,6 @@ static bool H8S_HOT hle_v1_crc_loop(h8s_cpu_t *cpu) {
      * SHLR.L #2 shifted out: bit 7 of the CRC read on the last pass. */
     cpu->ccr = (cpu->ccr & ~(CCR_N | CCR_V | CCR_C)) | CCR_Z | ((prev & 0x80) ? CCR_C : 0);
     cpu->pc = V1_CRC_LOOP_END;
-    return true;
-}
-
-/*
- * Two more byte loops, done natively for every pass but the last; the CPU
- * then runs the final pass itself, so registers and flags at the loop exit
- * are the CPU's own. Both are guarded by their exact code bytes.
- *
- * Boot ROM memset (cyrom112 0x1740): ER3 = dst, R1L = value, ER2 = count.
- *   1744: MOV.B R1L,@ER3 / ADDS #1,ER3 / 1748: SUBS #1,ER2 / MOV.L ER2,ER2
- *         BGE 1744
- * CyOS LCD row copy (0x206FA0): ER5 = src, ER1 = LCD data port, R3 = column.
- *   206FA0: MOV.B @ER5+,R2L / MOV.B R2L,@ER1 / ADDS #1,ER3
- *           CMP.W #0x27,R3 / BLS 206FA0
- */
-#define V1_MEMSET_LOOP  0x001748
-#define V1_LCD_ROW_LOOP 0x206FA0
-static const uint8_t v1_memset_code[] = {
-    0x68,0xB9,0x0B,0x03,0x1B,0x02,0x0F,0xA2,0x4C,0xF6 };     /* at 0x1744 */
-static const uint8_t v1_lcd_row_code[] = {
-    0x6C,0x5A,0x68,0x9A,0x0B,0x03,0x79,0x23,0x00,0x27,0x43,0xF4 };
-
-static bool plain_ram(uint32_t a, uint32_t n) {
-    return (EXT_RAM_HIT(a) && EXT_RAM_HIT(a + n - 1)) ||
-           (ON_CHIP_HIT(a) && ON_CHIP_HIT(a + n - 1));
-}
-
-static uint8_t *plain_ptr(address_bus_t *bus, uint32_t a) {
-    return EXT_RAM_HIT(a) ? bus->external_ram.data + EXT_RAM_OFF(a)
-                          : bus->on_chip_ram.data + ON_CHIP_OFF(a);
-}
-
-static bool H8S_HOT hle_v1_memset(h8s_cpu_t *cpu) {
-    int32_t left = (int32_t)cpu->er[2];          /* bytes still to write */
-    if (left < 2 || left > 0x80000)
-        return false;
-    if (memcmp(cpu->bus->boot_rom.data + 0x1744, v1_memset_code, sizeof v1_memset_code) != 0)
-        return false;
-    uint32_t dst = cpu->er[3] & 0xFFFFFF, k = (uint32_t)left - 1;
-    if (!plain_ram(dst, k))
-        return false;
-    memset(plain_ptr(cpu->bus, dst), (uint8_t)cpu->er[1], k);
-    cpu->er[3] += k;
-    cpu->er[2] -= k;                             /* 1: the CPU does the last */
-    return true;
-}
-
-static bool H8S_HOT hle_v1_lcd_row(h8s_cpu_t *cpu) {
-    uint16_t col = (uint16_t)cpu->er[3];
-    if (col > 0x26)                              /* fewer than two passes left */
-        return false;
-    const uint8_t *ram = cpu->bus->external_ram.data;
-    if (memcmp(ram + EXT_RAM_OFF(V1_LCD_ROW_LOOP), v1_lcd_row_code, sizeof v1_lcd_row_code) != 0)
-        return false;
-    uint32_t src = cpu->er[5] & 0xFFFFFF, k = 0x27 - col;  /* passes but the last */
-    if (!EXT_RAM_HIT(src) || !EXT_RAM_HIT(src + k - 1))
-        return false;
-    uint32_t port = cpu->er[1] & 0xFFFFFF;
-    const uint8_t *p = ram + EXT_RAM_OFF(src);
-    for (uint32_t i = 0; i < k; i++)
-        bus_write8(cpu->bus, port, p[i]);
-    cpu->er[5] += k;
-    cpu->er[3] = (cpu->er[3] & 0xFFFF0000u) | (uint16_t)(col + k);
-    cpu->er[2] = (cpu->er[2] & 0xFFFFFF00u) | p[k - 1];
     return true;
 }
 
@@ -1977,20 +1977,379 @@ static bool H8S_HOT hle_v1_rs(h8s_cpu_t *cpu) {
     return true;
 }
 
-/* Low byte of each hooked PC, so the run loop pays one table load */
-static const uint8_t v1_hle_lo[256] = {
-    [V1_CRC_LOOP & 0xFF] = 1, [V1_MEMSET_LOOP & 0xFF] = 1, [V1_LCD_ROW_LOOP & 0xFF] = 1,
-    [V1_RS_START & 0xFF] = 1 };
+#endif   /* CYBIKO_HAS_SPI_FLASH */
 
-static bool H8S_HOT hle_v1(h8s_cpu_t *cpu) {
+/*
+ * The two boot ROM drawing loops the idle Classic desktop spends most of
+ * its time in (26% of its instructions, measured 27 Oct 2026). Both run
+ * every pass but the last natively and leave the CPU at the loop top, so
+ * the last pass is the CPU's own. Registers, memory and flags after the
+ * native passes are what the CPU's passes leave (tests/hle_verify.sh
+ * checks every call against the CPU).
+ *
+ * Span fill (cyrom112 0x3A26), inside the function at 0x39AC:
+ *   3A26: ADDS #1,ER0 / SUBS #4,ER4 / MOV.W R4,R4 / BLE 3A32
+ *         MOV.B R1L,@ER0 / BRA 3A26
+ * A pass that continues writes R1L to the next byte.
+ *
+ * 1-bit to 2-bit blit (cyrom112 0x49C0), inside the function at 0x491A.
+ * Per pixel: R1 holds source bits (bit 8 is the pixel), R3 the colour
+ * pattern (R3H mask, R3L bits), R0L the destination byte being built.
+ * Locals on the stack: @(12) destination pointer, @(18) pattern reload,
+ * @(20) passes left - 1, @(34) bit position. ER6 walks the source.
+ *   49C0: SHLL.W R1 / BTST #0,R1H / BEQ 49D2
+ *         R0L = (R0L & ~R3H) | R3L             (via R2: R2 = ~R3H & 0xFF)
+ *   49D2: @(34) += 1                           (MOV.W / ADDS #1,ER5 / MOV.W)
+ *         SHLR.W #2,R3 / R2 = R3 >> 8 / BNE 49FE
+ *         @(12) byte = R0L, @(12) += 1, R0L = byte at @(12), R3 = @(18)
+ *   49FE: R2 = @(34) & 7 / BNE 4A10
+ *         ER6 += 1, R1 = byte at ER6
+ *   4A10: R2 = @(20) / ER4 = (E4:R2) - 1 / @(20) = R4 / BGT 49C0
+ */
+static const uint8_t hle_fill_code[] = {
+    0x0B,0x00,0x1B,0x94,0x0D,0x44,0x4F,0x04,0x68,0x89,0x40,0xF4 };
+static const uint8_t hle_blit_code[] = {
+    0x10,0x11,0x73,0x01,0x47,0x0C,0x0D,0x32,0x0C,0x2A,0x18,0x22,
+    0x17,0x0A,0x16,0xA8,0x14,0xB8,0x6F,0x75,0x00,0x22,0x0B,0x05,
+    0x6F,0xF5,0x00,0x22,0x11,0x53,0x0D,0x32,0x0C,0x2A,0x18,0x22,
+    0x0D,0x22,0x46,0x16,0x01,0x00,0x6F,0x75,0x00,0x0C,0x68,0xD8,
+    0x0B,0x05,0x01,0x00,0x6F,0xF5,0x00,0x0C,0x68,0x58,0x6F,0x73,
+    0x00,0x12,0x6F,0x72,0x00,0x22,0xEA,0x07,0xE2,0x00,0x0D,0x22,
+    0x46,0x06,0x0B,0x06,0x68,0x69,0xF1,0x00,0x6F,0x72,0x00,0x14,
+    0x0D,0x24,0x1B,0x04,0x6F,0xF4,0x00,0x14,0x0D,0x22,0x4E,0xA0 };
+#define HLE_MAX_PASSES 4096   /* then the CPU carries on from the loop top */
+
+static bool H8S_HOT hle_fill(h8s_cpu_t *cpu) {
+    int16_t r4 = (int16_t)cpu->er[4];
+    if (r4 <= 8)                                 /* fewer than two passes left */
+        return false;
+    if (memcmp(cpu->bus->boot_rom.data + HLE_FILL_LOOP, hle_fill_code, sizeof hle_fill_code) != 0)
+        return false;
+    uint32_t k = (uint32_t)(r4 - 1) / 4;         /* passes that write */
+    if (k > HLE_MAX_PASSES) k = HLE_MAX_PASSES;
+    uint32_t dst = (cpu->er[0] + 1) & 0xFFFFFF;
+    if (!plain_ram(dst, k))
+        return false;
+    memset(plain_ptr(cpu->bus, dst), (uint8_t)cpu->er[1], k);
+    cpu->er[0] += k;
+    cpu->er[4] -= 4 * k;                         /* R4 stays above 0: no borrow */
+    /* MOV.B R1L,@ER0 ends every pass that continues: N and Z from R1L, V=0 */
+    uint8_t v = (uint8_t)cpu->er[1];
+    cpu->ccr = (uint8_t)((cpu->ccr & ~(CCR_N | CCR_Z | CCR_V)) |
+                         ((v & 0x80) ? CCR_N : 0) | (v ? 0 : CCR_Z));
+    hle_passes = k;
+    return true;
+}
+
+static bool H8S_HOT hle_blit(h8s_cpu_t *cpu) {
+    address_bus_t *bus = cpu->bus;
+    uint32_t sp = cpu->er[7] & 0xFFFFFF;
+    if (!plain_ram(sp + 12, 24))
+        return false;
+    uint8_t *fr = plain_ptr(bus, sp);
+    int16_t left = (int16_t)((fr[20] << 8) | fr[21]);
+    if (left <= 0)                               /* this is the last pass */
+        return false;
+    if (memcmp(bus->boot_rom.data + HLE_BLIT_LOOP, hle_blit_code, sizeof hle_blit_code) != 0)
+        return false;
+    uint32_t n = (uint32_t)left;                 /* every pass but the last */
+    if (n > HLE_MAX_PASSES) n = HLE_MAX_PASSES;
+    uint32_t dst = (((uint32_t)fr[12] << 24) | ((uint32_t)fr[13] << 16) |
+                    ((uint32_t)fr[14] << 8) | fr[15]);
+    uint32_t src = cpu->er[6];
+    /* n passes store at most n/4 + 1 bytes and read one past them, and
+     * read at most n/8 + 1 source bytes */
+    if (!plain_ram(dst & 0xFFFFFF, n / 4 + 2) || !plain_ram((src + 1) & 0xFFFFFF, n / 8 + 1))
+        return false;
+
+    uint32_t r0l = cpu->er[0] & 0xFF, r1 = cpu->er[1] & 0xFFFF, r2 = cpu->er[2] & 0xFFFF;
+    uint32_t r3 = cpu->er[3] & 0xFFFF, er4 = cpu->er[4], er5 = cpu->er[5];
+    uint16_t pos = (uint16_t)((fr[34] << 8) | fr[35]);
+    uint16_t reload = (uint16_t)((fr[18] << 8) | fr[19]);
+    for (uint32_t i = 0; i < n; i++) {
+        r1 = (r1 << 1) & 0xFFFF;
+        if (r1 & 0x100) {
+            r2 = ~(r3 >> 8) & 0xFF;
+            r0l = (r0l & r2) | (r3 & 0xFF);
+        }
+        er5 = ((er5 & 0xFFFF0000u) | pos) + 1;   /* ADDS #1,ER5 carries into E5 */
+        pos = (uint16_t)er5;
+        r3 >>= 2;
+        r2 = r3 >> 8;
+        if (r2 == 0) {
+            uint8_t *d = plain_ptr(bus, dst & 0xFFFFFF);
+            d[0] = (uint8_t)r0l;
+            er5 = ++dst;
+            r0l = d[1];
+            r3 = reload;
+        }
+        r2 = pos & 7;
+        if (r2 == 0) {
+            src++;
+            r1 = *plain_ptr(bus, src & 0xFFFFFF);
+        }
+        r2 = (uint16_t)left;
+        er4 = ((er4 & 0xFFFF0000u) | r2) - 1;    /* SUBS #1,ER4 borrows from E4 */
+        left = (int16_t)er4;
+    }
+    fr[12] = (uint8_t)(dst >> 24); fr[13] = (uint8_t)(dst >> 16);
+    fr[14] = (uint8_t)(dst >> 8);  fr[15] = (uint8_t)dst;
+    fr[20] = (uint8_t)((uint16_t)left >> 8); fr[21] = (uint8_t)left;
+    fr[34] = (uint8_t)(pos >> 8); fr[35] = (uint8_t)pos;
+    cpu->er[0] = (cpu->er[0] & ~0xFFu) | r0l;
+    cpu->er[1] = (cpu->er[1] & 0xFFFF0000u) | r1;
+    cpu->er[2] = (cpu->er[2] & 0xFFFF0000u) | r2;
+    cpu->er[3] = (cpu->er[3] & 0xFFFF0000u) | r3;
+    cpu->er[4] = er4;
+    cpu->er[5] = er5;
+    cpu->er[6] = src;
+    /* SUB.B R2H,R2H at 49E2 cleared H and C; MOV.W R2,R2 at 4A1C set N
+     * and Z from R2 (> 0 on every native pass) and cleared V */
+    cpu->ccr &= ~(CCR_H | CCR_C | CCR_N | CCR_Z | CCR_V);
+    hle_passes = n;
+    return true;
+}
+
+/*
+ * Shifted byte copy (Classic 0x4104, Xtreme 0x27A0): text not on a byte
+ * boundary. Each pass shifts the next source byte left by @(27) bits
+ * (one bit a pass of the loop at +0x32), ORs its high byte into the low
+ * byte left by the previous one, and stores it.
+ *   +00: R0L = @(15) / R3 = @(46) - @(24) -> @(46) / BLE out
+ *   +18: ER5 = @(32) + 1 -> @(32) / R3 = byte at ER5 / R4L = @(27)
+ *        R5L = R4L / BLE / SHLL.W R3, R5L times
+ *   +38: @(14) = R3 / R2 = R3 >> 8 / R0L |= R2L
+ *   +46: R4 = @(46) - @(26) -> @(46) / BLE out / byte at ER6 = R0L, ER6+1
+ * A pass that would leave by either BLE is the CPU's.
+ */
+static const uint8_t hle_shcopy_code[] = {
+    0x6E,0x78,0x00,0x0F,0x6F,0x73,0x00,0x2E,0x6F,0x74,0x00,0x18,0x19,0x43,
+    0x6F,0xF3,0x00,0x2E,0x0D,0x33,0x58,0xF0,0x02,0xCE,0x01,0x00,0x6F,0x75,
+    0x00,0x20,0x0B,0x05,0x01,0x00,0x6F,0xF5,0x00,0x20,0x68,0x5B,0xF3,0x00,
+    0x6E,0x7C,0x00,0x1B,0x0C,0xCD,0x4F,0x06,0x10,0x13,0x8D,0xFF,0x46,0xFA,
+    0x6F,0xF3,0x00,0x0E,0x6F,0x72,0x00,0x0E,0x0C,0x2A,0x18,0x22,0x14,0xA8,
+    0x6F,0x74,0x00,0x2E,0x6F,0x75,0x00,0x1A,0x19,0x54,0x6F,0xF4,0x00,0x2E,
+    0x0D,0x44,0x58,0xF0,0x02,0x8C,0x68,0xE8,0x0B,0x06,0x40,0xA0 };
+
+static inline uint16_t be16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
+static inline void put_be16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+
+static bool H8S_HOT hle_shcopy(h8s_cpu_t *cpu) {
+    address_bus_t *bus = cpu->bus;
+    uint32_t sp = cpu->er[7] & 0xFFFFFF;
+    if (!plain_ram(sp, 48))
+        return false;
+    if (memcmp(bus->boot_rom.data + HLE_SHCOPY_LOOP, hle_shcopy_code, sizeof hle_shcopy_code) != 0)
+        return false;
+    uint8_t *fr = plain_ptr(bus, sp);
+    uint32_t er0 = cpu->er[0], er2 = cpu->er[2], er3 = cpu->er[3], er4 = cpu->er[4];
+    uint32_t er5 = cpu->er[5], er6 = cpu->er[6];
+    uint16_t sub = 0, after = 0;
+    uint32_t n = 0;
+    for (; n < HLE_MAX_PASSES; n++) {
+        uint16_t w24 = be16(fr + 24), w26 = be16(fr + 26);
+        uint16_t r3 = (uint16_t)(be16(fr + 46) - w24);
+        if ((int16_t)r3 <= 0)
+            break;
+        uint16_t r4 = (uint16_t)(r3 - w26);
+        if ((int16_t)r4 <= 0)
+            break;
+        uint32_t src = (((uint32_t)fr[32] << 24) | ((uint32_t)fr[33] << 16) |
+                        ((uint32_t)fr[34] << 8) | fr[35]) + 1;
+        if (!plain_ram(src & 0xFFFFFF, 1) || !plain_ram(er6 & 0xFFFFFF, 1))
+            break;
+        uint8_t r0l = fr[15];
+        uint8_t cnt = fr[27];
+        uint16_t v = *plain_ptr(bus, src & 0xFFFFFF);
+        if ((int8_t)cnt > 0)
+            v = (uint16_t)(v << cnt);
+        fr[32] = (uint8_t)(src >> 24); fr[33] = (uint8_t)(src >> 16);
+        fr[34] = (uint8_t)(src >> 8);  fr[35] = (uint8_t)src;
+        put_be16(fr + 14, v);
+        put_be16(fr + 46, r4);
+        r0l |= (uint8_t)(v >> 8);
+        *plain_ptr(bus, er6 & 0xFFFFFF) = r0l;
+        er6++;
+        er0 = (er0 & ~0xFFu) | r0l;
+        er2 = (er2 & 0xFFFF0000u) | (uint16_t)(v >> 8);
+        er3 = (er3 & 0xFFFF0000u) | v;
+        er4 = (er4 & 0xFFFF0000u) | r4;
+        er5 = (src & 0xFFFF0000u) | w26;         /* MOV.L @(32) then MOV.W @(26),R5 */
+        sub = r3;
+        after = w26;
+    }
+    if (n == 0)
+        return false;
+    cpu->er[0] = er0; cpu->er[2] = er2; cpu->er[3] = er3;
+    cpu->er[4] = er4; cpu->er[5] = er5; cpu->er[6] = er6;
+    /* SUB.W R5,R4 (r3 - @(26)) set H and C; MOV.B R0L,@ER6 then set N and
+     * Z from R0L and cleared V */
+    uint8_t r0l = (uint8_t)er0;
+    cpu->ccr = (uint8_t)((cpu->ccr & ~(CCR_H | CCR_N | CCR_Z | CCR_V | CCR_C)) |
+                         (((sub & 0xFFF) < (after & 0xFFF)) ? CCR_H : 0) |
+                         (sub < after ? CCR_C : 0) |
+                         ((r0l & 0x80) ? CCR_N : 0) | (r0l ? 0 : CCR_Z));
+    hle_passes = n;
+    return true;
+}
+
+/*
+ * Pre-blit shift (Classic 0x49AA, Xtreme 0x3046):
+ *   SHLR.W R3 / ADD.B #0xFF,R4L / BNE back      (R3 >>= R4L)
+ */
+static const uint8_t hle_shr_code[] = { 0x11,0x13,0x8C,0xFF,0x46,0xFA };
+
+static bool H8S_HOT hle_shr(h8s_cpu_t *cpu) {
+    uint8_t cnt = (uint8_t)cpu->er[4];
+    if (cnt < 2)
+        return false;
+    if (memcmp(cpu->bus->boot_rom.data + HLE_SHR_LOOP, hle_shr_code, sizeof hle_shr_code) != 0)
+        return false;
+    uint32_t k = cnt - 1u;
+    uint16_t r3 = (uint16_t)cpu->er[3];
+    r3 = k >= 16 ? 0 : (uint16_t)(r3 >> k);
+    cpu->er[3] = (cpu->er[3] & 0xFFFF0000u) | r3;
+    cpu->er[4] = (cpu->er[4] & 0xFFFFFF00u) | 1u;
+    /* ADD.B #0xFF to 2 left 1: carry and half carry out, N=Z=V=0 */
+    cpu->ccr = (uint8_t)((cpu->ccr & ~(CCR_H | CCR_N | CCR_Z | CCR_V | CCR_C)) | CCR_H | CCR_C);
+    hle_passes = k;
+    return true;
+}
+
+/*
+ * CyOS LCD row copy (Classic 0x206FA0, port ER1; Xtreme 0x4AE0C8, port
+ * ER0), done natively for every pass but the last.
+ *   MOV.B @ER5+,R2L / MOV.B R2L,@port / ADDS #1,ER3 / CMP.W #0x27,R3 / BLS
+ * ER5 = src, R3 = column. The writes go through the bus to the LCD.
+ */
+static const uint8_t hle_lcd_row_code[] = {
+    0x6C,0x5A,0x68,(uint8_t)(0x8A | (HLE_LCD_PORT_REG << 4)),0x0B,0x03,0x79,0x23,0x00,0x27,0x43,0xF4 };
+
+static bool H8S_HOT hle_lcd_row(h8s_cpu_t *cpu) {
+    uint16_t col = (uint16_t)cpu->er[3];
+    if (col > 0x26)                              /* fewer than two passes left */
+        return false;
+    const uint8_t *ram = cpu->bus->external_ram.data;
+    if (memcmp(ram + EXT_RAM_OFF(HLE_LCD_ROW_LOOP), hle_lcd_row_code, sizeof hle_lcd_row_code) != 0)
+        return false;
+    uint32_t src = cpu->er[5] & 0xFFFFFF, k = 0x27 - col;  /* passes but the last */
+    if (!EXT_RAM_HIT(src) || !EXT_RAM_HIT(src + k - 1))
+        return false;
+    uint32_t port = cpu->er[HLE_LCD_PORT_REG] & 0xFFFFFF;
+    const uint8_t *p = ram + EXT_RAM_OFF(src);
+    for (uint32_t i = 0; i < k; i++)
+        bus_write8(cpu->bus, port, p[i]);
+    cpu->er[5] += k;
+    cpu->er[3] = (cpu->er[3] & 0xFFFF0000u) | (uint16_t)(col + k);
+    cpu->er[2] = (cpu->er[2] & 0xFFFFFF00u) | p[k - 1];
+    return true;
+}
+
+/* Low byte of each hooked PC, so the run loop pays one table load */
+static const uint8_t hle_lo[256] = {
+    [HLE_MEMSET_LOOP & 0xFF] = 1, [HLE_FILL_LOOP & 0xFF] = 1, [HLE_BLIT_LOOP & 0xFF] = 1,
+    [HLE_SHCOPY_LOOP & 0xFF] = 1, [HLE_SHR_LOOP & 0xFF] = 1, [HLE_LCD_ROW_LOOP & 0xFF] = 1,
+#if CYBIKO_HAS_SPI_FLASH
+    [V1_CRC_LOOP & 0xFF] = 1, [V1_RS_START & 0xFF] = 1,
+#endif
+};
+
+static bool H8S_HOT hle_native(h8s_cpu_t *cpu) {
     switch (cpu->pc) {
+    case HLE_MEMSET_LOOP: return hle_memset(cpu);
+    case HLE_FILL_LOOP:   return hle_fill(cpu);
+    case HLE_BLIT_LOOP:   return hle_blit(cpu);
+    case HLE_SHCOPY_LOOP: return hle_shcopy(cpu);
+    case HLE_SHR_LOOP:    return hle_shr(cpu);
+    case HLE_LCD_ROW_LOOP: return hle_lcd_row(cpu);
+#if CYBIKO_HAS_SPI_FLASH
     case V1_CRC_LOOP:     return hle_v1_crc_loop(cpu);
-    case V1_MEMSET_LOOP:  return hle_v1_memset(cpu);
-    case V1_LCD_ROW_LOOP: return hle_v1_lcd_row(cpu);
     case V1_RS_START:     return hle_v1_rs(cpu);
+#endif
     }
     return false;
 }
+
+#ifdef CYBIKO_HLE_VERIFY
+/*
+ * Test builds (-DCYBIKO_HLE_VERIFY): each memset, fill, blit, shifted copy
+ * and shift call is checked.
+ * The native result is kept aside, the machine is rewound, and the CPU
+ * runs the same number of passes (arrivals back at the loop top); every
+ * register, the PC, the flags, and all of RAM must match. The CPU's result is the one kept.
+ */
+uint32_t cybiko_hle_checks, cybiko_hle_mismatches;
+
+static bool hle(h8s_cpu_t *cpu) {
+    uint32_t pc = cpu->pc;
+    if (pc != HLE_FILL_LOOP && pc != HLE_BLIT_LOOP && pc != HLE_MEMSET_LOOP
+        && pc != HLE_SHCOPY_LOOP && pc != HLE_SHR_LOOP && pc != HLE_LCD_ROW_LOOP)
+        return hle_native(cpu);
+    address_bus_t *bus = cpu->bus;
+    static uint8_t ext0[CYBIKO_EXT_RAM_SIZE], chip0[0x4000];
+    static uint8_t ext1[CYBIKO_EXT_RAM_SIZE], chip1[0x4000];
+    size_t chip_n = bus->on_chip_ram.size < sizeof chip0 ? bus->on_chip_ram.size : sizeof chip0;
+    h8s_cpu_t before = *cpu;
+    static hd66421_t lcd0, lcd1;   /* the LCD row writes the controller */
+    if (bus->lcd) lcd0 = *bus->lcd;
+    memcpy(ext0, bus->external_ram.data, sizeof ext0);
+    memcpy(chip0, bus->on_chip_ram.data, chip_n);
+    if (!hle_native(cpu))
+        return false;
+    h8s_cpu_t native = *cpu;
+    uint32_t passes = pc == HLE_LCD_ROW_LOOP ? 0x27 - (uint16_t)before.er[3] : hle_passes;
+    if (bus->lcd) { lcd1 = *bus->lcd; *bus->lcd = lcd0; }
+    memcpy(ext1, bus->external_ram.data, sizeof ext1);
+    memcpy(chip1, bus->on_chip_ram.data, chip_n);
+    *cpu = before;
+    memcpy(bus->external_ram.data, ext0, sizeof ext0);
+    memcpy(bus->on_chip_ram.data, chip0, chip_n);
+    for (uint32_t arrivals = 0; arrivals < passes; ) {
+        decode(cpu, fetch16(cpu));
+        if (cpu->pc == pc) arrivals++;
+    }
+    cybiko_hle_checks++;
+    bool same = memcmp(native.er, cpu->er, sizeof cpu->er) == 0 && native.pc == cpu->pc
+             && native.ccr == cpu->ccr
+             && memcmp(ext1, bus->external_ram.data, sizeof ext1) == 0
+             && memcmp(chip1, bus->on_chip_ram.data, chip_n) == 0
+             && (!bus->lcd || (memcmp(lcd1.vram, bus->lcd->vram, sizeof lcd1.vram) == 0
+                               && memcmp(lcd1.regs, bus->lcd->regs, sizeof lcd1.regs) == 0
+                               && lcd1.x_addr == bus->lcd->x_addr && lcd1.y_addr == bus->lcd->y_addr));
+    if (!same) {
+        if (cybiko_hle_mismatches++ < 5) {
+            fprintf(stderr, "HLE mismatch at %06X after %u passes:", pc, (unsigned)passes);
+            for (int i = 0; i < 8; i++)
+                if (native.er[i] != cpu->er[i])
+                    fprintf(stderr, " ER%d %08X/%08X", i, (unsigned)native.er[i], (unsigned)cpu->er[i]);
+            if (bus->lcd && memcmp(lcd1.vram, bus->lcd->vram, sizeof lcd1.vram))
+                fprintf(stderr, " LCD VRAM differs");
+            if (bus->lcd && (lcd1.x_addr != bus->lcd->x_addr || lcd1.y_addr != bus->lcd->y_addr))
+                fprintf(stderr, " LCD x,y %u,%u/%u,%u", lcd1.x_addr, lcd1.y_addr,
+                        bus->lcd->x_addr, bus->lcd->y_addr);
+            if (native.pc != cpu->pc)
+                fprintf(stderr, " PC %06X/%06X", (unsigned)native.pc, (unsigned)cpu->pc);
+            fprintf(stderr, " CCR %02X/%02X SP %08X", native.ccr, cpu->ccr, (unsigned)cpu->er[7]);
+            for (size_t i = 0; i < chip_n; i++)
+                if (chip1[i] != bus->on_chip_ram.data[i]) {
+                    fprintf(stderr, " chip %06X %02X/%02X", (unsigned)(CYBIKO_ON_CHIP_BASE + i),
+                            chip1[i], bus->on_chip_ram.data[i]);
+                    break;
+                }
+            for (size_t i = 0; i < sizeof ext1; i++)
+                if (ext1[i] != bus->external_ram.data[i]) {
+                    fprintf(stderr, " RAM %06X %02X/%02X", (unsigned)(CYBIKO_EXT_RAM_BASE + i),
+                            ext1[i], bus->external_ram.data[i]);
+                    break;
+                }
+            fprintf(stderr, "\n");
+        }
+    }
+    cpu->cycle_count += passes;   /* keep counting roughly as the native path */
+    return true;
+}
+#else
+#define hle hle_native
 #endif
 
 /* ======== Interrupt handling ======== */
@@ -2061,12 +2420,10 @@ void H8S_HOT h8s_cpu_run(h8s_cpu_t *cpu, int n) {
             else
                 break;  /* cycle_count counts executed instructions only */
         }
-#if CYBIKO_HAS_SPI_FLASH
-        if (v1_hle_lo[cpu->pc & 0xFF] && hle_v1(cpu)) {
+        if (hle_lo[cpu->pc & 0xFF] && hle(cpu)) {
             done++;
             continue;
         }
-#endif
         uint16_t op = fetch16(cpu);
         decode(cpu, op);
         done++;

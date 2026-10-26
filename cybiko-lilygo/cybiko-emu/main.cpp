@@ -5,6 +5,8 @@
 #include <TFT_eSPI.h>
 #include <driver/i2s.h>
 #include <Preferences.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -30,6 +32,18 @@ extern "C" {
 #ifndef REBIKO_VERSION
 #define REBIKO_VERSION "dev"   // tools/version.py sets it from ../VERSION
 #endif
+
+#ifdef CYBIKO_MACHINE_V1
+#define MACHINE_NAME  "Classic"
+#define OTHER_MACHINE "Xtreme"
+#else
+#define MACHINE_NAME  "Xtreme"
+#define OTHER_MACHINE "Classic"
+#endif
+// The T-Deck's two app slots hold one build of each model
+// (tools/flash_both.sh). Each build carries this tag, and a switch looks
+// for the other model's tag in the other slot before it boots it.
+extern "C" __attribute__((used)) const char rebiko_machine_tag[] = "REBIKO-MACHINE:" MACHINE_NAME "!";
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -57,6 +71,7 @@ static uint32_t blit_count = 0;
 static unsigned long emu_started_ms = 0;
 
 static rb_config_t g_cfg;   // settings (rebiko_config.h), saved in NVS
+static cybiko_emu_t *emu = NULL;
 
 // Backlight. The T-Deck's driver has 16 levels set by pulses on the BL pin:
 // high is full, and each low-high pulse steps one level down, wrapping.
@@ -166,38 +181,55 @@ static bool tdeck_bus_free(void) {
     return !tft.dmaBusy();
 }
 
-// Last frame sent to the panel. CyOS redraws rarely, and an unchanged
-// frame costs a 128 KB upscale and a ~13 ms DMA for nothing.
+// Last frame sent to the panel. The idle Classic desktop changes on about
+// 1 frame in 30, and then about 8 of its 100 rows, while CyOS rewrites
+// the LCD ~470 times a frame with the same bytes. The core's serial says
+// whether anything may have changed; then only the band of rows that did
+// is scaled and sent (a full 2x frame is a 128 KB upscale and ~13 ms DMA).
 static uint8_t shown_frame[160 * 100];
 static bool shown_valid = false;
+static uint32_t shown_serial;
 
 static void render_frame_body(const uint8_t *pixels, int w, int h) {
-    /* The 320x200 DMA blit is ~13 ms. If it is still running, skip this
-     * frame; shown_frame is not updated, so a change is drawn next time. */
+    /* If the last DMA is still running, skip this frame; shown_frame is
+     * not updated, so the change is drawn next time. */
     if (!emu_screen_shown() || tft.dmaBusy())
         return;
     if (boot_unpacking() && (++blit_count % 20) != 1)
         return;
-    size_t n = (size_t)w * h;
-    if (n > sizeof shown_frame)
-        n = sizeof shown_frame;
-    if (shown_valid && memcmp(shown_frame, pixels, n) == 0)
+    uint32_t serial = cybiko_lcd_serial(emu);
+    if (shown_valid && serial == shown_serial)
         return;
-    memcpy(shown_frame, pixels, n);
+    if (w * h > (int)sizeof shown_frame)
+        h = (int)sizeof shown_frame / w;
+    int y0 = 0, y1 = h - 1;
+    if (shown_valid) {
+        while (y0 < h && memcmp(shown_frame + y0 * w, pixels + y0 * w, w) == 0) y0++;
+        if (y0 == h) {
+            shown_serial = serial;
+            return;
+        }
+        while (memcmp(shown_frame + y1 * w, pixels + y1 * w, w) == 0) y1--;
+    }
+    memcpy(shown_frame + y0 * w, pixels + y0 * w, (size_t)(y1 - y0 + 1) * w);
     shown_valid = true;
+    shown_serial = serial;
+    int rows = y1 - y0 + 1;
 
     if (g_cfg.scale == RB_SCALE_1X) {
         // 1x, the Cybiko's own 160x100, centred in the 2x area
-        for (size_t i = 0; i < n; i++)
-            disp_buf[i] = gray_lut[pixels[i]];
+        uint16_t *dst = disp_buf + y0 * w;
+        const uint8_t *src = pixels + y0 * w;
+        for (int i = 0; i < rows * w; i++)
+            dst[i] = gray_lut[src[i]];
         tft.startWrite();
-        tft.pushImageDMA((SCALED_W - w) / 2, BORDER_TOP + (SCALED_H - h) / 2, w, h, disp_buf);
+        tft.pushImageDMA((SCALED_W - w) / 2, BORDER_TOP + (SCALED_H - h) / 2 + y0, w, rows, dst);
         tft.endWrite();
         return;
     }
 
-    // 2x nearest-neighbor upscale: 160x100 -> 320x200
-    for (int y = 0; y < h; y++) {
+    // 2x nearest-neighbor upscale of the changed rows: 160 -> 320 wide
+    for (int y = y0; y <= y1; y++) {
         const uint8_t *src_row = pixels + y * w;
         uint16_t *dst_row0 = disp_buf + (y * 2) * SCALED_W;
         uint16_t *dst_row1 = dst_row0 + SCALED_W;
@@ -210,7 +242,7 @@ static void render_frame_body(const uint8_t *pixels, int w, int h) {
         }
     }
     tft.startWrite();
-    tft.pushImageDMA(0, BORDER_TOP, SCALED_W, SCALED_H, disp_buf);
+    tft.pushImageDMA(0, BORDER_TOP + y0 * 2, SCALED_W, rows * 2, disp_buf + y0 * 2 * SCALED_W);
     tft.endWrite();
 }
 
@@ -424,7 +456,7 @@ static void init_trackball_interrupts(void) {
 }
 
 #ifdef CYBIKO_SPLIT_PROFILE
-extern "C" uint32_t cybiko_split[3];
+extern "C" uint32_t cybiko_split[5];
 #endif
 static void volume_step(int by);
 static void volume_done(void);
@@ -569,10 +601,8 @@ static bool cybiko_key_event(int ck, tdeck_key_event_t *ev) {
     default: return false;
     }
     if (ascii) {
-        // these keys are not found on the Xtreme, which lacks them
-        if (!tdeck_map_ascii(ascii, ev)) return false;
-        ev->needs_shift = false;
-        return true;
+        // the Xtreme reaches most of these through Fn, and \ through Shift
+        return tdeck_map_ascii(ascii, ev);
     }
     return tdeck_map_special(sp, &ev->col, &ev->mask);
 }
@@ -675,6 +705,26 @@ static void keyboard_task(void *arg) {
     }
 }
 
+static void send_screenshot(void) {
+    static const char DIGITS[] = "0123456789ABCDEF";
+    char line[2 * 160 + 1];
+    // The console drops output that doesn't fit at once (setTxTimeoutMs(0)
+    // in setup); a 32 KB screenshot may wait for a reader a little
+    Serial.setTxTimeoutMs(100);
+    Serial.print("SHOT ");
+    for (int y = 0; y < 100; y++) {
+        for (int x = 0; x < 160; x++) {
+            uint8_t v = shown_frame[y * 160 + x];
+            line[2 * x] = DIGITS[v >> 4];
+            line[2 * x + 1] = DIGITS[v & 15];
+        }
+        line[320] = 0;
+        Serial.print(line);
+    }
+    Serial.println();
+    Serial.setTxTimeoutMs(0);
+}
+
 static void poll_input(void) {
     uint8_t ev;
     while (kb_queue && xQueueReceive(kb_queue, &ev, 0) == pdTRUE) {
@@ -687,6 +737,8 @@ static void poll_input(void) {
     // Keys from the USB serial port, for scripted tests: ASCII as the old
     // key mode sent it ($ prefix included), 0x11-0x14 for trackball
     // up/down/left/right, 0x15 Mic, 0x16 a ball click, 0x17 a ball hold.
+    // 0x18 prints the Cybiko screen: "SHOT " and 16000 hex bytes, the
+    // 160x100 grey levels last drawn (tools/tdeck_shot.py).
     while (Serial.available() > 0) {
         int c = Serial.read();
         switch (c) {
@@ -702,6 +754,9 @@ static void poll_input(void) {
         case 0x17:
             rb_router_ball(&router, RB_PK_BALL_HOLD, true);
             rb_router_ball(&router, RB_PK_BALL_HOLD, false);
+            break;
+        case 0x18:
+            send_screenshot();
             break;
         default:   if (c > 0) rb_router_char(&router, (char)c); break;
         }
@@ -1136,7 +1191,6 @@ static void save_nvram(cybiko_emu_t *emu) {
 // Main
 // ---------------------------------------------------------------------------
 
-static cybiko_emu_t *emu = NULL;
 static uint32_t frame_count = 0;
 static unsigned long last_nvram_save_ms = 0;
 static unsigned long last_fps_report = 0;
@@ -1288,7 +1342,7 @@ static void tdeck_battery_apply(bool force_ram) {
 #ifdef CYBIKO_MACHINE_V1
     if (!emu) return;
     /* CyOS 1.2.46 stops idling — and Chat stops sending — on real pack
-     * ADC (PLAN-V1). Keep Java's charger readings in the guest so an
+     * ADC (PLAN.md). Keep Java's charger readings in the guest so an
      * unplugged T-Deck still talks LoRa. The chrome bar uses the LiPo. */
     uint16_t ch1 = 0x0300, ch2 = 0x0100;
     cybiko_set_adc(emu, 1, ch1);
@@ -1468,6 +1522,47 @@ static void hook_restart(void *ctx, const rb_config_t *c) {
     Serial.flush();
     delay(100);
     ESP.restart();
+}
+
+// Whether an app slot holds the named model's build (its tag is near the
+// start of the image's rodata)
+static bool slot_holds(const esp_partition_t *part, const char *name) {
+    char want[40];
+    int wl = snprintf(want, sizeof want, "REBIKO-MACHINE:%s!", name);
+    static uint8_t buf[4096 + 40];
+    int keep = 0;
+    for (uint32_t off = 0; off < 0x200000 && off + 4096 <= part->size; off += 4096) {
+        if (esp_partition_read(part, off, buf + keep, 4096) != ESP_OK)
+            return false;
+        int n = keep + 4096;
+        for (int i = 0; i + wl <= n; i++)
+            if (buf[i] == 'R' && memcmp(buf + i, want, wl) == 0)
+                return true;
+        keep = wl - 1;
+        memmove(buf, buf + n - keep, keep);
+    }
+    return false;
+}
+
+static bool hook_switch_machine(void *ctx, const rb_config_t *c) {
+    (void)ctx;
+    const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
+    if (!other || !slot_holds(other, OTHER_MACHINE)) {
+        Serial.printf("no %s build in the other app slot\n", OTHER_MACHINE);
+        return false;
+    }
+    g_cfg = *c;
+    save_config();
+    save_nvram(emu);
+    if (esp_ota_set_boot_partition(other) != ESP_OK) {
+        Serial.printf("%s in %s did not verify\n", OTHER_MACHINE, other->label);
+        return false;
+    }
+    Serial.printf("switching to the %s in %s\n", OTHER_MACHINE, other->label);
+    Serial.flush();
+    delay(100);
+    ESP.restart();
+    return true;
 }
 
 static bool hook_link_view(void *ctx) { (void)ctx; return link_view; }
@@ -1679,6 +1774,9 @@ void setup() {
         hooks.link_view = hook_link_view;
         hooks.set_link_view = hook_set_link_view;
         hooks.version = REBIKO_VERSION;
+        hooks.switch_machine = hook_switch_machine;
+        hooks.machine = MACHINE_NAME;
+        hooks.other_machine = OTHER_MACHINE;
         rb_menu_init(&menu, &hooks);
         rb_router_init(&router, &g_cfg.keys, &out);
     }
@@ -1926,8 +2024,8 @@ void setup() {
     }
 
     // Guest radio over the SX1262. Without CYBIKO_RADIO_TX the transport
-    // refuses sends and only receives. The Classic's radio is on SCI0,
-    // which is not emulated yet (PLAN-V1.md step 7).
+    // refuses sends and only receives. The Classic's radio is SCI0, and
+    // CyOS drives it (PLAN.md).
     static cybiko_radio_coproc_t radio_cop;
     if (cybiko_sx1262_transport()) {
         cybiko_radio_coproc_init(&radio_cop);
@@ -1961,7 +2059,11 @@ void setup() {
     emu_started_ms = millis();
     snprintf(chrome_top, sizeof chrome_top, "Loading CyOS...");
     draw_chrome();
-    Serial.println("ReBiko Pocket started");
+    // Printing the tag also keeps it in the image: unreferenced, the
+    // linker drops it and a switch from the other model can't find it.
+    Serial.printf("ReBiko Pocket started: %.*s, app slot %s\n",
+                  (int)strlen(MACHINE_NAME), rebiko_machine_tag + 15,
+                  esp_ota_get_running_partition()->label);
 }
 
 static void screen_wake(void) {
@@ -2138,11 +2240,14 @@ void loop() {
 #ifdef CYBIKO_SPLIT_PROFILE
         {
             if (cybiko_split[2])
-                Serial.printf("  split: timers %lu cyc/insn, cpu %lu cyc/insn over %lu insns\n",
+                Serial.printf("  split: timers %lu cyc/insn, cpu %lu cyc/insn over %lu insns;"
+                              " sleep %lu ms in %lu batches\n",
                               (unsigned long)(cybiko_split[0] / cybiko_split[2]),
                               (unsigned long)(cybiko_split[1] / cybiko_split[2]),
-                              (unsigned long)cybiko_split[2]);
-            cybiko_split[0] = cybiko_split[1] = cybiko_split[2] = 0;
+                              (unsigned long)cybiko_split[2],
+                              (unsigned long)(cybiko_split[3] / 240000u),
+                              (unsigned long)cybiko_split[4]);
+            memset(cybiko_split, 0, sizeof cybiko_split);
         }
 #endif
 #ifdef CYBIKO_MACHINE_V1

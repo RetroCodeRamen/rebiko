@@ -148,6 +148,13 @@ void cybiko_sci2_on_reg(cybiko_sci2_xt_t *s, int reg, uint8_t value) {
     execute(s, value);
     uint8_t old = s->scr;
     s->scr = value;
+    /* RXI is level: RDRF and RIE. A byte that arrived while RIE was off
+     * raises it as soon as RIE goes on (as sci0_v1 does). Without this, an
+     * indicator queued before CyOS's radio was ready sat in RDR for good,
+     * every later response queued behind it, and the Xtreme never took
+     * another frame (seen over LoRa, 26 Oct 2026). */
+    if ((value & 0x40) && !(old & 0x40) && s->rdrf)
+        raise_irq(s, CYBIKO_SCI2_RXI_VECTOR);
     bool tie = (s->scr & 0x80) != 0;
     bool tie_was_off = (old & 0x80) == 0;
     if (tie && s->tdre && (tie_was_off || s->txi_delay == 0))

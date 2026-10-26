@@ -44,6 +44,7 @@ void hd66421_init(hd66421_t *lcd) {
     lcd->regs[REG_PALETTE3] = 20;
     lcd->regs[REG_PALETTE4] = 31;
     lcd->regs[REG_CONTRAST] = 0;
+    lcd->dirty = true;
 }
 
 uint8_t hd66421_read8(hd66421_t *lcd, int offset) {
@@ -66,6 +67,12 @@ void hd66421_write8(hd66421_t *lcd, int offset, uint8_t value) {
         lcd->reg_index = value & 0x1F;
     } else {
         /* Store register value */
+        /* only the registers hd66421_render reads change the picture;
+         * X and Y are set before every write */
+        if (lcd->regs[lcd->reg_index] != value
+            && (lcd->reg_index == REG_CONTROL1 || lcd->reg_index == REG_CONTRAST
+                || (lcd->reg_index >= REG_PALETTE1 && lcd->reg_index <= REG_PALETTE4)))
+            lcd->dirty = true;
         lcd->regs[lcd->reg_index] = value;
 
         switch (lcd->reg_index) {
@@ -77,8 +84,9 @@ void hd66421_write8(hd66421_t *lcd, int offset, uint8_t value) {
             break;
         case REG_RAM: {
             int addr = lcd->y_addr * (HD66421_WIDTH / 4) + lcd->x_addr;
-            if (addr >= 0 && addr < HD66421_VRAM_SIZE) {
+            if (addr >= 0 && addr < HD66421_VRAM_SIZE && lcd->vram[addr] != value) {
                 lcd->vram[addr] = value;
+                lcd->dirty = true;
             }
             /* Auto-increment based on INC bit */
             if (lcd->regs[REG_CONTROL2] & R1_INC) {
@@ -104,6 +112,10 @@ void hd66421_write8(hd66421_t *lcd, int offset, uint8_t value) {
 }
 
 const uint8_t *hd66421_render(hd66421_t *lcd) {
+    if (!lcd->dirty)
+        return lcd->frame_buffer;
+    lcd->dirty = false;
+    lcd->serial++;
     /* If display not on, fill with white */
     if (!(lcd->regs[REG_CONTROL1] & R0_DISP)) {
         memset(lcd->frame_buffer, 255, HD66421_WIDTH * HD66421_HEIGHT);

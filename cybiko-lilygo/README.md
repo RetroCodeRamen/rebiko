@@ -56,15 +56,21 @@ Insert the SD card into the T-Deck.
 ### 2. Build and flash
 
 ```bash
-# Classic
-pio run -t upload -e T-Deck-Cybiko-V1
+# Both models: the Classic in app slot 0 (boots first), the Xtreme in slot 1
+tools/flash_both.sh
 
-# Xtreme (the default env)
-pio run -t upload
+# Or one model only, into slot 0
+pio run -t upload -e T-Deck-Cybiko-V1   # Classic
+pio run -t upload                       # Xtreme (the default env)
 
 # Serial log: fps, radio counters, saves
 pio run -t monitor
+
+# The Cybiko screen as a picture, over USB
+tools/tdeck_shot.py screen.png
 ```
+
+With both installed, menu > System > Machine switches between them: settings and CyOS's data are saved, then the T-Deck restarts as the other model. Each build carries a tag naming its model, and the switch checks the other slot for it first. `flash_both.sh` refuses an image without its tag.
 
 PlatformIO fetches TFT_eSPI and the other dependencies on the first build. Every ReBiko Pocket and ReBiko Radio has to run the same radio profile; when it changes, flash them all.
 
@@ -107,7 +113,7 @@ Volume has 11 levels, 0 to 10 (100%). After `$p` or `$m`, more `p` and `m` press
 | Performance & CPU | CPU mode: Dynamic (240 MHz, 160 MHz while CyOS sleeps), Always high (240 MHz), or Always low (160 MHz) |
 | Display | Brightness 4/4 to 1/4 · Scale 2x or 1x (the Cybiko's own 160×100) · Screen off when CyOS sleeps |
 | Audio | Sound on/off · Volume 0–10 (the same level as `$p` / `$m`) |
-| System | Version · Hardware info · Key reference · Radio link view · Restore all defaults · Restart ReBiko · Return to emulation |
+| System | Version · Machine (Classic or Xtreme) · Hardware info · Key reference · Radio link view · Restore all defaults · Restart ReBiko · Return to emulation |
 
 To change a mapping, choose the key, then Change mapping, and press the new key, `$` combination, or ball move or click. If that input already does something, the menu says what and asks before replacing it. Holding the ball cancels. `$` Mic can't be taken, so the menu is always reachable.
 

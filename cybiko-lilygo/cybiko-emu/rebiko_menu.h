@@ -42,7 +42,12 @@ typedef struct {
     void (*restart)(void *ctx, const rb_config_t *c);
     bool (*link_view)(void *ctx);
     void (*set_link_view)(void *ctx, bool on);
+    /* The other Cybiko model: save, then restart into it. Returns only if
+     * it isn't installed. NULL hides the row. */
+    bool (*switch_machine)(void *ctx, const rb_config_t *c);
     const char *version;
+    const char *machine;        /* "Classic" or "Xtreme" */
+    const char *other_machine;
 } rb_menu_hooks_t;
 
 typedef struct {

@@ -70,6 +70,12 @@ static void test_typing_and_symbols(void) {
     tap(PK('w'));                         /* Sym+W is 1 */
     rb_router_key(&router, RB_PK_SYM, false);
     CHECK(rec.last_char == '1');
+    rb_router_key(&router, RB_PK_SYM, true);
+    tap(RB_PK_MIC);                       /* Sym+Mic is 0, though Mic alone is unbound */
+    rb_router_key(&router, RB_PK_SYM, false);
+    CHECK(rec.last_char == '0');
+    tap(RB_PK_MIC);
+    CHECK(rec.last_char == '0' && rec.chars == 3);
     tap(RB_PK_DOLLAR); tap(RB_PK_DOLLAR); /* $ $ types $ */
     CHECK(rec.last_char == '$' && !router.dollar);
     CHECK(rec.keys == 0 && rec.cmds == 0);
@@ -440,6 +446,7 @@ static void test_menu_restore_all(void) {
     linkv = true;
     go(RB_NAV_DOWN, 4); go(RB_NAV_SELECT, 1);
     CHECK(rb_menu_screen(&menu) == RB_SCR_SYSTEM);
+    CHECK(rb_menu_cursor(&menu) == 2);   /* Machine is hidden without the hook */
     go(RB_NAV_DOWN, 3);                  /* Info, Key reference, Link view, Restore */
     char label[48];
     rb_menu_row(&menu, rb_menu_cursor(&menu), label, sizeof label, NULL, 0);
@@ -450,6 +457,28 @@ static void test_menu_restore_all(void) {
     rb_config_t d; rb_config_defaults(&d);
     CHECK(rb_config_equal(&applied, &d) && !linkv);
     CHECK(rb_menu_screen(&menu) == RB_SCR_SYSTEM);
+}
+
+static int switches;
+static bool h_switch(void *ctx, const rb_config_t *c) { (void)ctx; (void)c; switches++; return false; }
+
+static void test_menu_switch_machine(void) {
+    menu_setup();
+    menu.hooks.switch_machine = h_switch;
+    menu.hooks.machine = "Classic";
+    menu.hooks.other_machine = "Xtreme";
+    go(RB_NAV_DOWN, 4); go(RB_NAV_SELECT, 1);
+    CHECK(rb_menu_screen(&menu) == RB_SCR_SYSTEM && rb_menu_cursor(&menu) == 1);
+    char label[48], value[48];
+    rb_menu_row(&menu, 1, label, sizeof label, value, sizeof value);
+    CHECK(strcmp(label, "Machine") == 0 && strstr(value, "Classic"));
+    go(RB_NAV_SELECT, 1);
+    CHECK(rb_menu_screen(&menu) == RB_SCR_CONFIRM && strstr(rb_menu_line(&menu, 0), "Xtreme"));
+    go(RB_NAV_SELECT, 1);                /* Cancel is the default */
+    CHECK(switches == 0 && rb_menu_screen(&menu) == RB_SCR_SYSTEM);
+    go(RB_NAV_SELECT, 1); go(RB_NAV_UP, 1); go(RB_NAV_SELECT, 1);
+    CHECK(switches == 1);
+    CHECK(rb_menu_screen(&menu) == RB_SCR_MESSAGE && strstr(rb_menu_line(&menu, 0), "isn't installed"));
 }
 
 static void test_menu_controls_scrolls_to_end(void) {
@@ -483,6 +512,7 @@ int main(void) {
         { "capture refuses $+Mic", test_menu_capture_refuses_menu_chord },
         { "menu restore all", test_menu_restore_all },
         { "Controls scrolls to the end", test_menu_controls_scrolls_to_end },
+        { "switch machine", test_menu_switch_machine },
     };
     for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) {
         int before = failures;

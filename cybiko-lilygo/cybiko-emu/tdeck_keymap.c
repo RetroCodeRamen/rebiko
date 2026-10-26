@@ -95,6 +95,27 @@ static const tdeck_ascii_key_t ASCII_MAP[] = {
     { '8', TDECK_FN_COL, TDECK_FN_MASK, true, 0, 0x1000 },
     { '9', TDECK_FN_COL, TDECK_FN_MASK, true, 0, 0x2000 },
     { '0', TDECK_FN_COL, TDECK_FN_MASK, true, 9, 0x0010 },
+    /* The Xtreme's own symbol keys, and its Fn and Shift layers, for the
+     * T-Deck's Sym characters (Java emulator docs/research/xt-keyboard.md) */
+    { '!', 9, 0x0004, false, 0, 0 },
+    { '(', 2, 0x0400, false, 0, 0 },
+    { ')', 0, 0x0200, false, 0, 0 },
+    { '#',  TDECK_FN_COL, TDECK_FN_MASK, true, 3, 0x0010 },   /* Fn+X */
+    { '*',  TDECK_FN_COL, TDECK_FN_MASK, true, 1, 0x0002 },   /* Fn+G */
+    { '@',  TDECK_FN_COL, TDECK_FN_MASK, true, 3, 0x0004 },   /* Fn+A */
+    { '$',  TDECK_FN_COL, TDECK_FN_MASK, true, 2, 0x0100 },   /* Fn+D */
+    { '/',  TDECK_FN_COL, TDECK_FN_MASK, true, 9, 0x0002 },   /* Fn+. */
+    { '?',  TDECK_FN_COL, TDECK_FN_MASK, true, 9, 0x0004 },   /* Fn+! */
+    { '_',  TDECK_FN_COL, TDECK_FN_MASK, true, 0, 0x0800 },   /* Fn+K */
+    { ':',  TDECK_FN_COL, TDECK_FN_MASK, true, 9, 0x0008 },   /* Fn+; */
+    { '+',  TDECK_FN_COL, TDECK_FN_MASK, true, 1, 0x0010 },   /* Fn+H */
+    { '"',  TDECK_FN_COL, TDECK_FN_MASK, true, 3, 0x0008 },   /* Fn+Z */
+    { '-',  TDECK_FN_COL, TDECK_FN_MASK, true, 1, 0x0080 },   /* Fn+J */
+    { '\'', TDECK_FN_COL, TDECK_FN_MASK, true, 0, 0x0400 },  /* Fn+, */
+    { '=',  TDECK_FN_COL, TDECK_FN_MASK, true, 0, 0x4000 },   /* Fn+L */
+    { '[',  TDECK_FN_COL, TDECK_FN_MASK, true, 2, 0x0400 },   /* Fn+( */
+    { ']',  TDECK_FN_COL, TDECK_FN_MASK, true, 0, 0x0200 },   /* Fn+) */
+    { '\\', 9, 0x0002, false, 0, 0 },                        /* Shift+. */
 };
 #endif
 
@@ -114,7 +135,10 @@ bool tdeck_map_ascii(char c, tdeck_key_event_t *ev) {
     }
     if (!ev) return true;
     ev->found = true;
-    ev->needs_shift = (upper && !k->needs_fn) || k->ascii == '$';
+    ev->needs_shift = (upper && !k->needs_fn) || (k->ascii == '$' && !k->needs_fn);
+#ifndef CYBIKO_MACHINE_V1
+    if (k->ascii == '\\') ev->needs_shift = true;   /* Xtreme: Shift+. */
+#endif
     ev->needs_fn = k->needs_fn;
     ev->col = k->col;
     ev->mask = k->mask;

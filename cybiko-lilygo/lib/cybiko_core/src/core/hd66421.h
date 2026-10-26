@@ -13,6 +13,11 @@ typedef struct {
     uint8_t reg_index;
     uint8_t x_addr;
     uint8_t y_addr;
+    /* The picture may differ from frame_buffer. Set only when a write
+     * changes VRAM or a register: CyOS rewrites the same bytes hundreds of
+     * times a frame while the picture changes a few times a second. */
+    bool dirty;
+    uint32_t serial;    /* counts rebuilds of frame_buffer */
 } hd66421_t;
 
 void    hd66421_init(hd66421_t *lcd);

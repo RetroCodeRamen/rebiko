@@ -313,6 +313,14 @@ void rb_router_set_mode(rb_router_t *r, rb_mode_t m) {
 }
 
 static void dispatch(rb_router_t *r, rb_chord_t c, int phys) {
+    /* Sym held: the key types its Sym character whatever it is bound to
+     * (Sym+Mic is 0, and Mic alone does nothing by default) */
+    bool sym = (r->down >> RB_PK_SYM) & 1;
+    char sc = c.mod == RB_MOD_NONE && sym ? rb_phys_char(c.phys, true) : 0;
+    if (sc) {
+        if (r->out.type_char) r->out.type_char(r->out.ctx, sc, phys);
+        return;
+    }
     rb_action_t a = rb_lookup(r->bindings, c);
     switch (a.kind) {
     case RB_ACT_TYPE: {
