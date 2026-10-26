@@ -7,7 +7,7 @@ ReBiko runs unmodified CyOS on new hardware:
 
 LoRa is a transport under the emulated AVR radio co-processor, not a new Cybiko application. The Cybiko Classic (V1, CyOS 1.2.46) is the main machine. The Xtreme (XT, CyOS 1.5.08) is the second.
 
-The work order is in [PLAN-V1.md](PLAN-V1.md) (Classic) and [PLAN.md](PLAN.md) (Xtreme). The latest measured numbers are in [README.md](README.md) and [cybiko-lilygo/README.md](cybiko-lilygo/README.md#performance).
+The work order is [PLAN.md](PLAN.md). The latest measured numbers are in [README.md](README.md) and [cybiko-lilygo/README.md](cybiko-lilygo/README.md#performance).
 
 ## Decision
 
@@ -219,7 +219,7 @@ Saves go through `save.tmp` at 20 MHz SPI:
 - **XT:** writes `/cybiko/save.nvram` every 5 minutes, when it has changed. A full 2 MB save took 2.3 s on the attached board.
 - **V1:** writes the AT45 chip image to `/cybiko-v1/save.flash` 10 s after CyOS's last flash page write.
 
-Battery (V1): CyOS 1.2.46 stops idling on any real on-battery ADC reading (see [PLAN-V1.md](PLAN-V1.md#battery-gauge)). Its radio stops with it. So the guest always sees Java's charger values. The firmware patches out CyOS's low-battery icon, and shows the LiPo level in the T-Deck's own top bar instead.
+Battery (V1): CyOS 1.2.46 stops idling on any real on-battery ADC reading (see [PLAN.md](PLAN.md#battery-gauge)). Its radio stops with it. So the guest always sees Java's charger values. The firmware patches out CyOS's low-battery icon, and shows the LiPo level in the T-Deck's own top bar instead.
 
 ## Machines
 

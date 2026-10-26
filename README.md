@@ -190,7 +190,7 @@ Right-click → **Status**. This is the radio health panel, not a CyOS screen.
 | **ReBiko Pocket** | T-Deck handheld that *is* the Cybiko — keyboard, LCD, trackball, LoRa, battery |
 | **ReBiko Radio** | Heltec V3 USB SLIP modem so the PC can share the same 915 MHz channel |
 
-The guest is unmodified CyOS. This is not a Cybiko-style rewrite. Design notes live in [ARCHITECTURE.md](ARCHITECTURE.md); the work order is [PLAN.md](PLAN.md) (Xtreme) and [PLAN-V1.md](PLAN-V1.md) (Classic).
+The guest is unmodified CyOS. This is not a Cybiko-style rewrite. Design notes live in [ARCHITECTURE.md](ARCHITECTURE.md). The work order, including what is done and what is open, is [PLAN.md](PLAN.md).
 
 ---
 

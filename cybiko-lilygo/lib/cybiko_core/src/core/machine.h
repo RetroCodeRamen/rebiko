@@ -8,8 +8,8 @@
  * compare against these as constants and the ESP32 speed depends on that.
  *
  * XT values are the ones the core always used. V1 values follow
- * MachineConfig.java (MIT, Copyright 2026 Dan Berkowitz). V1 is not
- * complete: the SCI0 radio is still missing (PLAN-V1.md step 7).
+ * MachineConfig.java (MIT, Copyright 2026 Dan Berkowitz). The Classic
+ * radio is SCI0 and CyOS drives it. Status is in PLAN.md.
  */
 
 #if defined(CYBIKO_MACHINE_V1) && defined(CYBIKO_MACHINE_XT)
