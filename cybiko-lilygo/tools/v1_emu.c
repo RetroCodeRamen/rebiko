@@ -1260,8 +1260,10 @@ static void guest_reboot(sdl_ctx_t *s) {
     if (s->lora)
         cybiko_lora_seed_msg_id(s->lora, (uint32_t)SDL_GetPerformanceCounter());
     s->powered = true;
-    if (s->audio)
+    if (s->audio) {
+        SDL_ClearQueuedAudio(s->audio);
         SDL_PauseAudioDevice(s->audio, s->mute ? 1 : 0);
+    }
     fprintf(stderr, "guest reboot\n");
 }
 
@@ -1270,8 +1272,10 @@ static void guest_power_off(sdl_ctx_t *s) {
     s->powered = false;
     drop_all_keys(s);
     blank_lcd(s);
-    if (s->audio)
+    if (s->audio) {
         SDL_PauseAudioDevice(s->audio, 1);
+        SDL_ClearQueuedAudio(s->audio);
+    }
     fprintf(stderr, "guest power off\n");
 }
 
@@ -1282,8 +1286,10 @@ static void settings_click(sdl_ctx_t *s, int x, int y) {
         save_prefs(s);
     } else if (y >= 80 && y < 112) {
         s->mute = !s->mute;
-        if (s->audio)
+        if (s->audio) {
+            SDL_ClearQueuedAudio(s->audio);
             SDL_PauseAudioDevice(s->audio, (s->mute || !s->powered) ? 1 : 0);
+        }
         save_prefs(s);
     } else if (y >= 112 && y < 144) {
         if (x < 140 && s->scale_pct > 50) {
@@ -1476,9 +1482,9 @@ static void draw_status(sdl_ctx_t *s) {
         draw_text(ren, 20, 140, 1, 230, 240, 255, line);
     }
     if (s->lora) {
-        snprintf(line, sizeof line, "  air tx %u  rx %u  bad %u",
+        snprintf(line, sizeof line, "  air tx %u  rx %u  bad %u  missed %u",
                  s->lora->stats.tx_pkts, s->lora->stats.rx_msgs,
-                 s->lora->stats.rx_bad);
+                 s->lora->stats.rx_bad, s->lora->stats.rx_lost);
         draw_text(ren, 20, 156, 1, 230, 240, 255, line);
     }
 
@@ -1633,10 +1639,15 @@ static void hal_keys(void *ctx, uint16_t *m, int n) {
     memcpy(m, s->key_matrix, (size_t)cols * sizeof(uint16_t));
 }
 
+/* Most audio allowed to wait in SDL's queue: 100 ms. Past that a frame's
+ * samples are dropped, so the speaker never lags the screen by more. */
+#define AUDIO_QUEUE_MAX (SPEAKER_SAMPLE_RATE / 10)
+
 static void hal_audio(void *ctx, const uint8_t *samples, int count) {
     sdl_ctx_t *s = ctx;
-    if (s->audio)
-        SDL_QueueAudio(s->audio, samples, (Uint32)count);
+    if (!s->audio || s->mute || !s->powered) return;
+    if (SDL_GetQueuedAudioSize(s->audio) > AUDIO_QUEUE_MAX) return;
+    SDL_QueueAudio(s->audio, samples, (Uint32)count);
 }
 
 static void hal_serial(void *ctx, uint8_t byte) {
@@ -1927,13 +1938,13 @@ static void radio_report(const cybiko_emu_t *emu, const cybiko_lora_t *lt,
     cybiko_v1_radio_status_t st = {0};
     cybiko_v1_radio_status(emu, &st);
     fprintf(stderr, "Radio: %s guest sent %u delivered %u  "
-            "tx msgs %u pkts %u rejected %u  rx pkts %u msgs %u bad %u  "
+            "tx msgs %u pkts %u rejected %u  rx pkts %u msgs %u bad %u lost %u  "
             "rssi %d snr %d\n",
             st.radio_up ? "up" : "-",
             st.tx_frames, st.rx_injected,
             lt->stats.tx_msgs, lt->stats.tx_pkts,
             lt->stats.tx_rejected, lt->stats.rx_pkts, lt->stats.rx_msgs,
-            lt->stats.rx_bad,
+            lt->stats.rx_bad, lt->stats.rx_lost,
             sp->stats.last_rssi_dbm, sp->stats.last_snr_db);
 }
 
@@ -2169,6 +2180,11 @@ int main(int argc, char **argv) {
     sdl.running = &running;
     uint32_t radio_at = SDL_GetTicks() + 10000;
     uint32_t status_at = 0;
+    /* Pace to a deadline 1/60 s apart. Waiting out 16 ms per frame ran the
+     * guest 4% fast, and the audio queue grew by the difference. */
+    const Uint64 freq = SDL_GetPerformanceFrequency();
+    const Uint64 period = freq / CYBIKO_FPS;
+    Uint64 next = SDL_GetPerformanceCounter();
     while (running) {
         uint32_t t0 = SDL_GetTicks();
         SDL_Event ev;
@@ -2199,8 +2215,12 @@ int main(int argc, char **argv) {
         }
         while (SDL_PollEvent(&ev))
             on_event(&sdl, &ev, &running);
-        uint32_t dt = SDL_GetTicks() - t0;
-        if (dt < 16) SDL_Delay(16 - dt);
+        next += period;
+        Uint64 now = SDL_GetPerformanceCounter();
+        if (now < next)
+            SDL_Delay((Uint32)((next - now) * 1000 / freq));
+        else if (now - next > freq / 10)
+            next = now;   /* fell behind: don't race to catch up */
     }
 
     if (nvram_path) {

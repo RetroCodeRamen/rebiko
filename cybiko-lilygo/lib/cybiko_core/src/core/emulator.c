@@ -530,6 +530,10 @@ uint32_t cybiko_get_pc(const cybiko_emu_t *emu) {
     return emu->cpu.pc;
 }
 
+bool cybiko_lcd_on(const cybiko_emu_t *emu) {
+    return (emu->lcd.regs[0] & 0x40) != 0;   /* control 1, DISP */
+}
+
 bool cybiko_is_halted(const cybiko_emu_t *emu) {
     return emu->cpu.halted;
 }

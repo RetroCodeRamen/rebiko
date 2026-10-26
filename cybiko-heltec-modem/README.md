@@ -4,7 +4,7 @@ Turns a Heltec WiFi LoRa 32 V3 into the radio for ReBiko Desktop:
 
     ReBiko Desktop  →  USB (CP2102, SLIP at 921600)  →  Heltec SX1262  →  LoRa  →  ReBiko Pocket (T-Deck)
 
-The SX1262 driver is `../cybiko-c-emulator/src/radio/sx1262_phy.cpp`, the same one the T-Deck uses. The radio profile is in `../cybiko-c-emulator/src/radio/radio_transport.h`, so both ends share it: 915 MHz, SF7, 500 kHz, CR 4/5, 14 dBm, sync word 0x1424, listen-before-talk. Change it and flash both. The serial protocol is in `../cybiko-c-emulator/src/radio/modem_proto.h`.
+The SX1262 driver is `../cybiko-c-emulator/src/radio/sx1262_phy.cpp`, the same one the T-Deck uses. The radio profile is in `../cybiko-c-emulator/src/radio/radio_transport.h`, so both ends share it: 915 MHz, SF7, 500 kHz, CR 4/5, 22 dBm, sync word 0x1424, listen-before-talk. Change it and flash both. The serial protocol is in `../cybiko-c-emulator/src/radio/modem_proto.h`.
 
 The modem does not decide what to send. Every packet comes from the PC.
 

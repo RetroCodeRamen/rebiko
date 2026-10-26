@@ -77,6 +77,26 @@ static int lora_send(cybiko_radio_transport_t *self,
     return 0;
 }
 
+/* Each sender numbers its messages 1, 2, 3, ... so a gap is a message
+ * this radio never completed (lost or corrupted on the air). */
+static void count_lost(cybiko_lora_t *t, uint32_t sender, uint16_t id) {
+    int i;
+    for (i = 0; i < CYBIKO_LORA_PEERS; i++)
+        if (t->peers[i].used && t->peers[i].sender == sender)
+            break;
+    if (i == CYBIKO_LORA_PEERS) {
+        i = t->peer_next;
+        t->peer_next = (t->peer_next + 1) % CYBIKO_LORA_PEERS;
+        t->peers[i].used = true;
+        t->peers[i].sender = sender;
+    } else {
+        uint16_t gap = (uint16_t)(id - t->peers[i].last_id);
+        if (gap > 1 && gap <= CYBIKO_LORA_MAX_GAP)
+            t->stats.rx_lost += gap - 1u;
+    }
+    t->peers[i].last_id = id;
+}
+
 static void lora_pump(cybiko_radio_transport_t *self) {
     cybiko_lora_t *t = self->impl;
     cybiko_radio_phy_t *phy = t->phy;
@@ -105,6 +125,7 @@ static void lora_pump(cybiko_radio_transport_t *self) {
                                  (unsigned)sender, snip);
             }
             t->stats.rx_msgs++;
+            count_lost(t, sender, (uint16_t)((pkt[3] << 8) | pkt[4]));
             if (t->fn)
                 t->fn(t->fn_user, out, out_len, channel, sender);
         }

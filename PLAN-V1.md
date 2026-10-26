@@ -186,7 +186,9 @@ The owner asked for the T-Deck battery to drive the Classic's gauge.
 
 ## Open
 
-- **Range.** The first distance test came out short at 14 dBm / 500 kHz. Look at the antennas, the bandwidth (125 kHz gains about 6 dB) and the power, keeping airtime in mind.
+- **Range.** The goal is the most distance with no lost messages. Since 24 Oct the power is 22 dBm (+8 dB), and `$l` with `modem_tool --ping` measures loss and SNR in both directions.
+  - **Next lever: SF.** The bandwidth stays at 500 kHz, because that keeps the fixed channel under FCC 15.247. SF8 gains about 2.5 dB and SF9 about 5 dB. A Chat frame takes about 82 ms on air at SF7, 146 ms at SF8 and 260 ms at SF9.
+  - **Antennas** are the cheapest gain after that.
 - **More of CyOS over the air:**
   - two T-Decks;
   - private messages;

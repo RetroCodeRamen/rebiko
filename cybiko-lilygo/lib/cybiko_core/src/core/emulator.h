@@ -63,6 +63,9 @@ bool cybiko_patch_cyid(cybiko_emu_t *emu, uint32_t cyid);
 const uint8_t *cybiko_get_vram(const cybiko_emu_t *emu);
 uint32_t cybiko_get_pc(const cybiko_emu_t *emu);
 bool cybiko_is_halted(const cybiko_emu_t *emu);
+/* HD66421 DISP bit. Classic CyOS clears it when it sleeps (5 idle minutes)
+ * and sets it again on a key. */
+bool cybiko_lcd_on(const cybiko_emu_t *emu);
 /* ERn, and a guest byte read (through the bus: do not peek I/O registers
  * with side effects). For host debugging tools. */
 uint32_t cybiko_get_reg(const cybiko_emu_t *emu, int n);

@@ -32,7 +32,17 @@ typedef struct {
     uint32_t rx_pkts;       /* PHY packets read */
     uint32_t rx_msgs;       /* payloads delivered to the listener */
     uint32_t rx_bad;        /* malformed or bad link CRC */
+    uint32_t rx_lost;       /* gaps in a sender's message ids: never heard */
 } cybiko_lora_stats_t;
+
+/* Range-test pings go out on a channel CyOS never tunes, so every
+ * co-processor drops them and only the link counters see them. */
+#define CYBIKO_LORA_PING_CHANNEL 0
+
+/* Senders whose next message id is tracked for rx_lost. */
+#define CYBIKO_LORA_PEERS 4
+/* A larger jump is a restart (ids are seeded at random), not loss. */
+#define CYBIKO_LORA_MAX_GAP 64
 
 typedef struct {
     cybiko_radio_transport_t base;
@@ -50,6 +60,12 @@ typedef struct {
     int txq_head, txq_count;
     uint32_t pumps;
     cybiko_lora_stats_t stats;
+    struct {
+        uint32_t sender;
+        uint16_t last_id;
+        bool used;
+    } peers[CYBIKO_LORA_PEERS];
+    int peer_next;          /* slot to reuse when the table is full */
 } cybiko_lora_t;
 
 /* tx_enabled false: sends are rejected and counted, receive still works.

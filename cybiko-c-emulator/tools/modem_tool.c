@@ -5,7 +5,9 @@
  *
  * Opens the modem, prints its hello and status, and runs radio_lora over
  * it: every received payload is printed with its sender, and with --ping
- * a numbered "PING" payload is sent every MS milliseconds.
+ * a numbered "PING" payload is sent every MS milliseconds on the ping
+ * channel, which CyOS ignores. Every 5 s it prints what was heard and
+ * lost: run it here and walk with a T-Deck showing $l for a range test.
  */
 #include "radio_lora.h"
 #include "radio_serial_phy.h"
@@ -68,22 +70,31 @@ int main(int argc, char **argv) {
         uint64_t t = now_ms();
         if (t >= next_status) {
             cybiko_serial_phy_request_status(&sp);
+            if (t > start + 1000) {
+                unsigned heard = lt.stats.rx_msgs, lost = lt.stats.rx_lost;
+                printf("link heard %u lost %u (%.1f%%) last rssi %d snr %d\n", heard, lost,
+                       heard + lost ? 100.0 * lost / (heard + lost) : 0.0,
+                       sp.stats.last_rssi_dbm, sp.stats.last_snr_db);
+                fflush(stdout);
+            }
             next_status = t + 5000;
         }
         if (ping_ms > 0 && t >= next_ping) {
             char msg[32];
             int n = snprintf(msg, sizeof msg, "PING %u from PC", seq++);
-            int rc = lt.base.send_packet(&lt.base, (const uint8_t *)msg, (size_t)n, 2);
+            int rc = lt.base.send_packet(&lt.base, (const uint8_t *)msg, (size_t)n,
+                                         CYBIKO_LORA_PING_CHANNEL);
             printf("tx %s -> %d\n", msg, rc);
+            fflush(stdout);
             next_ping = t + (uint64_t)ping_ms;
         }
         usleep(2000);
     }
     lt.base.pump(&lt.base);
-    printf("summary: lora tx_msgs %u tx_pkts %u rejected %u rx_pkts %u rx_msgs %u rx_bad %u | "
+    printf("summary: lora tx_msgs %u tx_pkts %u rejected %u rx_pkts %u rx_msgs %u rx_bad %u rx_lost %u | "
            "modem sent %u timeout %u refused %u lost %u rx %u\n",
            lt.stats.tx_msgs, lt.stats.tx_pkts, lt.stats.tx_rejected, lt.stats.rx_pkts,
-           lt.stats.rx_msgs, lt.stats.rx_bad, sp.stats.tx_sent, sp.stats.tx_timeout,
+           lt.stats.rx_msgs, lt.stats.rx_bad, lt.stats.rx_lost, sp.stats.tx_sent, sp.stats.tx_timeout,
            sp.stats.tx_refused, sp.stats.tx_lost, sp.stats.rx_pkts);
     cybiko_serial_phy_close(&sp);
     return 0;

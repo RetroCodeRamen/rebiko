@@ -49,6 +49,58 @@ static uint16_t *disp_buf;  // 320x200 RGB565 in PSRAM
 static uint32_t blit_count = 0;
 static unsigned long emu_started_ms = 0;
 
+// Backlight. The T-Deck's driver has 16 levels set by pulses on the BL pin:
+// high is full, and each low-high pulse steps one level down, wrapping.
+// Held low for 3 ms it turns off. $b steps through LIGHT_LEVELS, kept in NVS.
+static const uint8_t LIGHT_LEVELS[] = { 16, 12, 8, 4 };
+#define LIGHT_COUNT (sizeof LIGHT_LEVELS)
+#define LIGHT_DEFAULT 1   // 12 of 16
+static uint8_t light_idx = LIGHT_DEFAULT;
+static uint8_t bl_level;  // what the driver is at now; 0 = off
+
+static void backlight_set(uint8_t level) {
+    if (level == bl_level) return;
+    if (level == 0) {
+        digitalWrite(PIN_TFT_BL, LOW);
+        delay(3);
+        bl_level = 0;
+        return;
+    }
+    if (bl_level == 0) {
+        digitalWrite(PIN_TFT_BL, HIGH);
+        bl_level = 16;
+        delay(1);   // let the driver start before counting pulses
+    }
+    int pulses = (16 + bl_level - level) % 16;
+    for (int i = 0; i < pulses; i++) {
+        digitalWrite(PIN_TFT_BL, LOW);
+        delayMicroseconds(2);
+        digitalWrite(PIN_TFT_BL, HIGH);
+        delayMicroseconds(2);
+    }
+    bl_level = level;
+}
+
+static void light_load(void) {
+    Preferences p;
+    p.begin("cybiko", true);
+    light_idx = p.getUChar("light", LIGHT_DEFAULT);
+    p.end();
+    if (light_idx >= LIGHT_COUNT) light_idx = LIGHT_DEFAULT;
+}
+
+// Screen sleep: when CyOS turns its LCD off (after 5 idle minutes), the
+// backlight goes off, nothing is drawn, and the CPU drops to 160 MHz. A
+// key wakes CyOS, which turns its LCD back on, and the screen follows.
+// 160 MHz runs a sleeping CyOS ~46% busy. It does not suit the awake
+// desktop: CyOS redraws in bursts of 22-45 ms frames there, close to the
+// whole frame budget on average, so the 67 ms audio queue would run dry.
+#define SCREEN_OFF_FRAMES 60   // CyOS blanks for a moment while booting
+#define AWAKE_MHZ  240
+#define ASLEEP_MHZ 160
+static bool screen_on = true;
+static int lcd_off_frames;
+
 // Loading phase: only every 20th frame is drawn, and silent frames are
 // fast-forwarded (hal_audio_output). It ends when CyOS has idled (asleep
 // >= 60% for three 60-frame windows in a row; boot dips quiet for a second
@@ -123,7 +175,7 @@ static bool shown_valid = false;
 static void render_frame_body(const uint8_t *pixels, int w, int h) {
     /* The 320x200 DMA blit is ~13 ms. If it is still running, skip this
      * frame; shown_frame is not updated, so a change is drawn next time. */
-    if (tft.dmaBusy())
+    if (!screen_on || tft.dmaBusy())
         return;
     if (boot_unpacking() && (++blit_count % 20) != 1)
         return;
@@ -395,7 +447,60 @@ static bool cmd_pending;
 static unsigned long volume_until;   // volume mode ends at this millis(); 0 = off
 static char chrome_top[40] = "ReBiko Pocket";
 
+/* $l: a range test. The bottom line shows what this radio hears, and a
+ * ping goes out every second on the ping channel (CyOS ignores it) for
+ * modem_tool on the PC to count. Green: hearing everything; yellow: some
+ * lost; red: nothing heard for 5 s. */
+#define LINK_PING_MS 1000
+static bool link_view;
+static uint32_t link_ping_at, link_ping_seq;
+static uint32_t link_rx_seen, link_rx_at;
+
+static void draw_link_line(void) {
+    const cybiko_lora_t *lk = cybiko_sx1262_link();
+    char line[48];
+    uint16_t color = TFT_RED;
+    if (!lk) {
+        snprintf(line, sizeof line, "radio down");
+    } else {
+        const cybiko_sx1262_stats_t *rs = cybiko_sx1262_phy_stats();
+        uint32_t heard = lk->stats.rx_msgs, lost = lk->stats.rx_lost;
+        uint32_t ago = link_rx_at ? (millis() - link_rx_at) / 1000 : 0;
+        float pct = heard + lost ? 100.0f * lost / (heard + lost) : 0.0f;
+        snprintf(line, sizeof line, "rx %lu lost %lu %.1f%%  %ddBm snr %d  %lus",
+                 (unsigned long)heard, (unsigned long)lost, pct,
+                 rs->last_rssi_dbm, rs->last_snr_db, (unsigned long)ago);
+        if (link_rx_at && ago < 5)
+            color = lost ? TFT_YELLOW : TFT_GREEN;
+    }
+    tft.setTextColor(color, TFT_BLACK);
+    tft.drawString(line, 4, BORDER_BOTTOM + 2, 2);
+}
+
+static void link_tick(uint32_t now) {
+    const cybiko_lora_t *lk = cybiko_sx1262_link();
+    if (!link_view || (long)(now - link_ping_at) < 0)
+        return;
+    link_ping_at = now + LINK_PING_MS;
+    if (lk && lk->stats.rx_msgs != link_rx_seen) {
+        link_rx_seen = lk->stats.rx_msgs;
+        link_rx_at = now;
+    }
+    if (cybiko_radio_transport_t *t = cybiko_sx1262_transport()) {
+        char msg[32];
+        int n = snprintf(msg, sizeof msg, "PING %lu from T-Deck", (unsigned long)link_ping_seq++);
+        t->send_packet(t, (const uint8_t *)msg, (size_t)n, CYBIKO_LORA_PING_CHANNEL);
+    }
+    if (!screen_on)
+        return;
+    tft.dmaWait();
+    tft.fillRect(0, BORDER_BOTTOM, SCALED_W, 240 - BORDER_BOTTOM, TFT_BLACK);
+    draw_link_line();
+}
+
 static void draw_chrome(void) {
+    if (!screen_on)
+        return;
     tft.dmaWait();
     tft.fillRect(0, 0, SCALED_W, BORDER_TOP, TFT_BLACK);
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -413,6 +518,10 @@ static void draw_chrome(void) {
         tft.drawString("$", 300, 2, 2);
     }
     tft.fillRect(0, BORDER_BOTTOM, SCALED_W, 240 - BORDER_BOTTOM, TFT_BLACK);
+    if (link_view && !cmd_pending) {
+        draw_link_line();
+        return;
+    }
     tft.setTextColor(cmd_pending ? TFT_YELLOW : TFT_DARKGREY, TFT_BLACK);
     tft.drawString(cmd_pending ? "$x Esc  $h Help  $q-u F1-7  $p/m Vol" :
                                  "$ then x=Esc h=Help q-u=F1-7 p/m=Vol",
@@ -450,6 +559,23 @@ static void handle_key(char c) {
         case 'u': press_special(TDECK_KEY_F7); break;
         case 'p': volume_step(+1); break;
         case 'm': volume_step(-1); break;
+        case 'b': {
+            light_idx = (light_idx + 1) % LIGHT_COUNT;
+            backlight_set(LIGHT_LEVELS[light_idx]);
+            Preferences p;
+            p.begin("cybiko", false);
+            p.putUChar("light", light_idx);
+            p.end();
+            snprintf(chrome_top, sizeof chrome_top, "backlight %u/%u",
+                     (unsigned)(LIGHT_COUNT - light_idx), (unsigned)LIGHT_COUNT);
+            draw_chrome();
+            break;
+        }
+        case 'l':
+            link_view = !link_view;
+            link_ping_at = millis();
+            draw_chrome();
+            break;
         case '$': process_ascii_key('$'); break;
         default: break;   // anything else cancels
         }
@@ -1233,7 +1359,8 @@ void setup() {
     tft.setSwapBytes(true);  // ESP32 is little-endian, ST7789 expects big-endian
     tft.fillScreen(TFT_BLACK);
     pinMode(PIN_TFT_BL, OUTPUT);
-    digitalWrite(PIN_TFT_BL, HIGH);
+    light_load();
+    backlight_set(LIGHT_LEVELS[light_idx]);
 
     // Display buffer: internal DMA-capable SRAM if a 128 KB block is free,
     // so the per-frame upscale does not stream through the PSRAM cache that
@@ -1496,6 +1623,25 @@ void setup() {
     Serial.println("ReBiko Pocket started");
 }
 
+static void screen_follow_cyos(void) {
+    if (cybiko_lcd_on(emu)) {
+        lcd_off_frames = 0;
+        if (screen_on) return;
+        setCpuFrequencyMhz(AWAKE_MHZ);
+        screen_on = true;
+        shown_valid = false;      // redraw the whole frame
+        backlight_set(LIGHT_LEVELS[light_idx]);
+        draw_chrome();
+        Serial.println("screen on");
+        return;
+    }
+    if (!screen_on || ++lcd_off_frames < SCREEN_OFF_FRAMES) return;
+    screen_on = false;
+    backlight_set(0);
+    setCpuFrequencyMhz(ASLEEP_MHZ);
+    Serial.println("screen off: CyOS is asleep");
+}
+
 // Hold the guest to the real Cybiko's 60 Hz. Each frame is a fixed slice
 // of guest time (RTC ticks once per frame, keys hold for 4 frames, audio
 // is generated per frame), so running idle CyOS at 260 fps made all of
@@ -1597,6 +1743,8 @@ void loop() {
         cybiko_stats_t bst;
         cybiko_get_stats(emu, &bst);
         check_boot_done(&bst);
+    } else {
+        screen_follow_cyos();
     }
 
     frame_count++;
@@ -1618,19 +1766,20 @@ void loop() {
         uint32_t frames = st.frames - last_stats.frames;
         uint32_t cpu_us = frame_us > render_us ? frame_us - render_us : 0;
         float kips = insns / elapsed_sec / 1000.0f;
-        float cyc_per_insn = insns ? (cpu_us * 240.0f) / insns : 0.0f;
+        float cyc_per_insn = insns ? (cpu_us * (float)getCpuFrequencyMhz()) / insns : 0.0f;
         float sleep_pct = frames ? 100.0f * slept /
             ((float)frames * CYBIKO_CYCLES_PER_FRAME) : 0.0f;
         Serial.printf("%.1f fps (%.0f%%)  %.0f kIPS  %.0f cyc/insn  "
                       "sleep %.0f%%  core %lu ms  render %lu ms  idle %lu ms  "
-                      "audio gaps %lu  bat %lu mV %s %d%%\n",
+                      "audio gaps %lu  bat %lu mV %s %d%%  "
+                      "cpu %lu MHz\n",
                       fps, speed_pct, kips, cyc_per_insn, sleep_pct,
                       (unsigned long)(cpu_us / 1000),
                       (unsigned long)(render_us / 1000),
                       (unsigned long)(pace_wait_us / 1000),
                       (unsigned long)i2s_underruns,
                       (unsigned long)bat_mv, bat_src_tag(),
-                      bat_pct);
+                      bat_pct, (unsigned long)getCpuFrequencyMhz());
         i2s_underruns = 0;
         pace_wait_us = 0;
 #ifdef CYBIKO_SPLIT_PROFILE
@@ -1659,10 +1808,11 @@ void loop() {
 #endif
         if (const cybiko_lora_t *lk = cybiko_sx1262_link()) {
             const cybiko_sx1262_stats_t *rs = cybiko_sx1262_phy_stats();
-            Serial.printf("  radio rx %lu (crc %lu, link bad %lu, msgs %lu) "
+            Serial.printf("  radio rx %lu (crc %lu, link bad %lu, msgs %lu, lost %lu) "
                           "tx %lu done %lu rejected %lu waited %lu  rssi %d snr %d  bus waits %lu\n",
                           (unsigned long)rs->rx_ok, (unsigned long)rs->rx_crc,
                           (unsigned long)lk->stats.rx_bad, (unsigned long)lk->stats.rx_msgs,
+                          (unsigned long)lk->stats.rx_lost,
                           (unsigned long)lk->stats.tx_pkts, (unsigned long)rs->tx_done,
                           (unsigned long)lk->stats.tx_rejected,
                           (unsigned long)rs->tx_deferred,
@@ -1684,6 +1834,7 @@ void loop() {
 
     if (volume_until && (long)(now - volume_until) >= 0)
         volume_done();
+    link_tick(now);
 
 #ifdef CYBIKO_MACHINE_V1
     // Save the flash image once CyOS has stopped writing it for 10 s, so a

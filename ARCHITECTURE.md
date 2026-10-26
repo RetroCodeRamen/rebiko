@@ -156,7 +156,7 @@ SX1262 explicit-header mode carries at most 255 bytes. Current CyOS payloads are
 16+   chunk
 ```
 
-No transport ACK and no transport retry. CyOS is the protocol that retransmits. PHY duplicates are dropped by message id; CyOS's own 3× retransmit gets a new id each time.
+No transport ACK and no transport retry. CyOS is the protocol that retransmits. PHY duplicates are dropped by message id; CyOS's own 3× retransmit gets a new id each time. Each sender numbers its messages in sequence, so `radio_lora.c` counts a gap as `rx_lost` (a jump of more than 64 is a restart). Range-test pings (`$l`, `modem_tool --ping`) use channel 0, which CyOS never tunes.
 
 `sx1262_phy.cpp` is shared by the T-Deck and the Heltec modem: DIO2 RF switch, 1.8 V TCXO with recalibration, image calibration, PA, OCP, TX-clamp and IQ errata, private sync word `0x1424`, continuous RX. TX starts and returns; TxDone/RxDone are read in `poll()` when DIO1 is high.
 
@@ -174,7 +174,7 @@ Default profile:
 | Bandwidth | 500 kHz | Chat is ~82 ms on the air |
 | Spreading factor | 7 | |
 | Coding rate | 4/5 | |
-| Power | 14 dBm | `CYBIKO_LORA_POWER_DBM`; bench builds may pass less |
+| Power | 22 dBm | `CYBIKO_LORA_POWER_DBM`, the SX1262 maximum; bench builds may pass less |
 | Sync word | 0x1424 | Private LoRa, not LoRaWAN |
 | Preamble | 8 symbols | |
 
@@ -251,4 +251,4 @@ See [README.md](README.md#status) for the latest run. In short:
 - The T-Deck runs the Classic at 60 fps.
 - Chat MAIN crosses between ReBiko Desktop (on a Heltec) and a T-Deck over LoRa, 6 of 6 lines both ways, and rooms stay apart.
 - Not yet tested over the air: two T-Decks, private messages, the people list, and games.
-- Range is short so far.
+- Range is being measured with the `$l` link view (22 dBm since 24 Oct).

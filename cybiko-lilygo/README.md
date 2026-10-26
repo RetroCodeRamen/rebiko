@@ -82,8 +82,14 @@ The T-Deck boots straight into CyOS. On first boot, CyOS asks for a nickname.
 | `$` `s` / `i` / `d` / `g` | Select / Insert / Delete / Tab |
 | `$` `$` | A `$` |
 | `$` `p` / `m` | Volume up / down |
+| `$` `l` | Link view on / off (range test, below) |
+| `$` `b` | Backlight: steps 4/4, 3/4, 2/4, 1/4 and round again |
 
 Volume has 11 levels, 0 (off) to 10 (100%). After `$p` or `$m`, more `p` and `m` presses keep stepping it for 2 seconds after each press: `$ m m m` is three levels down. Any other key ends volume mode and is typed normally. The level is kept in the ESP32's NVS.
+
+The backlight starts at 3/4. Its level is kept in NVS too.
+
+**Screen sleep:** After 5 idle minutes CyOS turns its LCD off. The T-Deck then turns off the backlight, stops drawing, and drops the CPU from 240 to 160 MHz. Any key wakes CyOS, and the screen comes back with it at 240. The radio keeps running while it sleeps. The awake desktop stays at 240: at 160 its redraw bursts use nearly every frame's time, and the sound would break up.
 
 Each typed key is held for 12 frames, then released for 3 before the next one, or for 10 if it is the same key again. CyOS 1.2.46 misses shorter presses.
 
@@ -91,7 +97,15 @@ Each typed key is held for 12 frames, then released for 3 before the next one, o
 
 **Saves:** The Classic writes CyOS's flash chip to `/cybiko-v1/save.flash` 10 s after CyOS's last write to it. That covers your nickname, settings and files. The Xtreme saves RAM to `/cybiko/save.nvram` every 5 minutes, when it has changed. Both are written to `save.tmp` first and then renamed. SD SPI runs at 20 MHz.
 
-**Radio:** The SX1262 sits under the emulated radio co-processor. It runs at 915 MHz, SF7, 500 kHz, 14 dBm, with listen-before-talk. CyOS's own radio code runs unchanged. Chat rooms are radio channels, and the co-processor hears only the channel CyOS tuned. CyOS transmits nothing until wireless is on in its settings. On the PC side, ReBiko Desktop (`tools/v1_emu.c`) uses a Heltec running ReBiko Radio (`../cybiko-heltec-modem/`).
+**Radio:** The SX1262 sits under the emulated radio co-processor. It runs at 915 MHz, SF7, 500 kHz, 22 dBm, with listen-before-talk. CyOS's own radio code runs unchanged. Chat rooms are radio channels, and the co-processor hears only the channel CyOS tuned. CyOS transmits nothing until wireless is on in its settings. On the PC side, ReBiko Desktop (`tools/v1_emu.c`) uses a Heltec running ReBiko Radio (`../cybiko-heltec-modem/`).
+
+**Range test:** `$l` swaps the bottom hint line for a link readout, and the T-Deck sends a ping every second:
+
+    rx 120 lost 2 1.6%  -96dBm snr 4  1s
+
+The fields are messages heard, messages missed, last RSSI, last SNR, and seconds since the last one. Misses are counted from gaps in each sender's message numbers. The line is green while everything is arriving, yellow once something was missed, and red after 5 s of silence.
+
+On the PC, run `../cybiko-c-emulator/build/modem_tool /dev/ttyUSB0 --seconds 600 --ping 1000` (ReBiko Desktop must be closed). It pings back and prints the same counts for the other direction every 5 s. Pings use channel 0, which CyOS never tunes, so CyOS never sees them. At SF7 the receiver stops decoding at about −7.5 dB SNR, so an SNR that gets near that is the edge of range.
 
 ## Project Structure
 

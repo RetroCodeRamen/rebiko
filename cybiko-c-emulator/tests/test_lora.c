@@ -211,6 +211,20 @@ static void test_restart_with_new_seed(void) {
     TEST_CHECK(lora_a.base.send_packet(&lora_a.base, x, sizeof x, 2) == 0);
     pump_both(4);
     TEST_CHECK(got.count == 4);
+    TEST_CHECK(lora_b.stats.rx_lost == 0);   /* a restart is not loss */
+}
+
+static void test_lost_messages_counted(void) {
+    setup(CYBIKO_LORA_PHY_MAX, 1, true);
+    uint8_t x[42];
+    fill(x, sizeof x, 13);
+    for (int i = 0; i < 6; i++) {
+        phy_a.corrupt_next = (i == 1 || i == 3 || i == 4);
+        TEST_CHECK(lora_a.base.send_packet(&lora_a.base, x, sizeof x, 2) == 0);
+        pump_both(4);
+    }
+    TEST_CHECK(got.count == 3);
+    TEST_CHECK(lora_b.stats.rx_lost == 3);
 }
 
 static void test_both_directions(void) {
@@ -233,5 +247,6 @@ TEST_LIST = {
     { "bad packet is counted, not delivered", test_bad_packet_counted },
     { "both directions at once", test_both_directions },
     { "restarted sender with a new seed is not a repeat", test_restart_with_new_seed },
+    { "gaps in message ids are counted as lost", test_lost_messages_counted },
     { NULL, NULL }
 };

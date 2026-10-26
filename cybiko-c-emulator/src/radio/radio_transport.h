@@ -37,8 +37,10 @@ extern "C" {
 #define CYBIKO_LORA_BW_HZ         500000u
 #define CYBIKO_LORA_SF            7
 #define CYBIKO_LORA_CR_DENOM      5       /* 4/5 */
+/* +22 dBm is the SX1262's top setting, inside 15.247's 30 dBm. Each 6 dB
+ * roughly doubles line-of-sight range; 22 is 8 dB over the old 14. */
 #ifndef CYBIKO_LORA_POWER_DBM     /* bench builds pass a lower value */
-#define CYBIKO_LORA_POWER_DBM     14
+#define CYBIKO_LORA_POWER_DBM     22
 #endif
 #define CYBIKO_LORA_SYNC_WORD     0x1424  /* private LoRa, not LoRaWAN public */
 #define CYBIKO_LORA_PREAMBLE      8

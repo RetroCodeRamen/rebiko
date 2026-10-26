@@ -204,7 +204,7 @@ Honest snapshot, 24 Oct 2026.
 | Heltec auto-detect + ReBiko Radio OLED | CyOS app loader from the PC |
 | ReBiko Pocket (T-Deck Classic firmware) | XT battery on Port A |
 | PC ↔ T-Deck Chat over LoRa, rooms kept apart | Native Windows click-through window shape |
-| T-Deck volume 0–10, settings saved 10 s after a change | LoRa range (short on the first distance test) |
+| T-Deck volume 0–10, settings saved 10 s after a change | Longest range with no lost messages (22 dBm, `$l` link view) |
 | | Private messages, the people list and multiplayer games over the air |
 
 Chat over the air works now. The bench test is the PC on a Heltec and a T-Deck in Chat MAIN, 3 lines each way, and it passes 6/6. v1.1026.3b is the first download with it; Chat in v1.1026.2b and earlier doesn't work.
