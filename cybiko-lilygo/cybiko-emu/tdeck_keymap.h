@@ -74,7 +74,7 @@ bool tdeck_map_ascii(char c, tdeck_key_event_t *ev);
  * key and the trackball. */
 typedef enum {
     TDECK_KEY_ESC, TDECK_KEY_HELP, TDECK_KEY_SELECT, TDECK_KEY_INSERT,
-    TDECK_KEY_DELETE, TDECK_KEY_TAB,
+    TDECK_KEY_DELETE, TDECK_KEY_TAB, TDECK_KEY_BKSP,
     TDECK_KEY_F1, TDECK_KEY_F2, TDECK_KEY_F3, TDECK_KEY_F4,
     TDECK_KEY_F5, TDECK_KEY_F6, TDECK_KEY_F7,
     TDECK_KEY_COUNT

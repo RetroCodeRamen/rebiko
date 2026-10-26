@@ -11,10 +11,12 @@ typedef struct {
 
 #ifdef CYBIKO_MACHINE_V1
 /* Classic: every character here is one key, no Fn. Backspace is the
- * Del position, as in the Java emulator. */
+ * BkSp key (A.6 bit 2), which erases before the cursor; Del (A.0 bit 2)
+ * deletes forward and does nothing at the end of a line. The Java
+ * emulator sent Backspace to Del. */
 static const tdeck_ascii_key_t ASCII_MAP[] = {
     { 'q', 0, 0x10, false, 0, 0 }, { 'a', 0, 0x20, false, 0, 0 },
-    { '`', 0, 0x40, false, 0, 0 }, { '\b', 0, 0x04, false, 0, 0 },
+    { '`', 0, 0x40, false, 0, 0 }, { '\b', 6, 0x04, false, 0, 0 },
     { 0x1B, 0, 0x02, false, 0, 0 },
     { '2', 1, 0x08, false, 0, 0 }, { 'w', 1, 0x10, false, 0, 0 },
     { 's', 1, 0x20, false, 0, 0 }, { 'z', 1, 0x40, false, 0, 0 },
@@ -127,6 +129,7 @@ static const struct { int col; uint16_t mask; } SPECIAL[TDECK_KEY_COUNT] = {
     [TDECK_KEY_ESC]    = { 0, 0x02 }, [TDECK_KEY_HELP]   = { 2, 0x80 },
     [TDECK_KEY_SELECT] = { 4, 0x04 }, [TDECK_KEY_INSERT] = { 1, 0x04 },
     [TDECK_KEY_DELETE] = { 0, 0x04 }, [TDECK_KEY_TAB]    = { 3, 0x04 },
+    [TDECK_KEY_BKSP]   = { 6, 0x04 },
     [TDECK_KEY_F1] = { 6, 0x01 }, [TDECK_KEY_F2] = { 5, 0x01 },
     [TDECK_KEY_F3] = { 2, 0x02 }, [TDECK_KEY_F4] = { 3, 0x01 },
     [TDECK_KEY_F5] = { 2, 0x01 }, [TDECK_KEY_F6] = { 1, 0x01 },
@@ -138,6 +141,7 @@ static const struct { int col; uint16_t mask; } SPECIAL[TDECK_KEY_COUNT] = {
     [TDECK_KEY_ESC]    = { 5, 0x0400 }, [TDECK_KEY_HELP]   = { 9, 0x0001 },
     [TDECK_KEY_SELECT] = { 4, 0x0010 }, [TDECK_KEY_INSERT] = { 5, 0x0200 },
     [TDECK_KEY_DELETE] = { 5, 0x0100 }, [TDECK_KEY_TAB]    = { 5, 0x0080 },
+    [TDECK_KEY_BKSP]   = { 5, 0x0100 },   /* the Xtreme has Del only */
     [TDECK_KEY_F1] = { 6, 0x0001 }, [TDECK_KEY_F2] = { 5, 0x0001 },
     [TDECK_KEY_F3] = { 4, 0x0001 }, [TDECK_KEY_F4] = { 3, 0x0001 },
     [TDECK_KEY_F5] = { 2, 0x0001 }, [TDECK_KEY_F6] = { 1, 0x0001 },

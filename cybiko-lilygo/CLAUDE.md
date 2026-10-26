@@ -54,11 +54,17 @@ The core compiles as a unity build (`cybiko_core_unity.c`) for cross-file inlini
 
 ### Display Pipeline
 
-Cybiko LCD (160x100 grayscale) → 256-entry grayscale-to-RGB565 LUT → 2x nearest-neighbor upscale to 320x200 → DMA push to ST7789 at 80MHz SPI. Unchanged frames are not redrawn. The RGB565 buffer prefers internal DMA SRAM. Display is centered vertically on the 320x240 panel with 20px borders.
+Cybiko LCD (160x100 grayscale) → 256-entry grayscale-to-RGB565 LUT → 2x nearest-neighbor upscale to 320x200 → DMA push to ST7789 at 80MHz SPI. Unchanged frames are not redrawn. The RGB565 buffer prefers internal DMA SRAM. Display is centered vertically on the 320x240 panel with 20px borders. Display > Scale 1x pushes the 160x100 frame unscaled, centred in the same area. The menu draws over the whole panel with TFT_eSPI calls (`draw_menu`).
 
 ### Keyboard Pipeline
 
-T-Deck keyboard (I2C ASCII, drained by its own task) → `process_ascii_key()` maps to Cybiko matrix positions → typed keys are queued taps, one at a time: held 12 frames, then all keys up for 3 frames before the next (10 if it is the same key again). CyOS 1.2.46 misses a key held under 10 frames now and then, and a second tap of a key that is still down would only lengthen it ("ll" became "l"). `tools/v1_chat.sh` measured both.
+The keyboard controller (ESP32-C3 at I2C 0x55) runs in raw mode (command 0x03, sent every boot because the controller keeps its mode across an ESP32 reset): 5 bytes per poll, one per column, bit n = row n, set while held. `keyboard_task` polls it every 5 ms and queues press/release events. In key mode the Mic key sends nothing at all, which is why raw mode is needed. `tools/keytest` env `keytest-raw` prints the bits.
+
+Input goes through `cybiko-emu/rebiko_input.c`, plain C tested on the host (`tests/run_rebiko.sh`): physical key or trackball event → chord (alone, or after the `$` prefix) → binding lookup (user overrides in `g_cfg.keys`, then `rb_default_action`) → a Cybiko key, a typed character (base or Sym layer, as the controller's own tables), an emulator command, or menu navigation while the menu is open. Typed keys are queued taps: held 12 frames, then all keys up for 3 frames before the next (10 if it is the same key again). CyOS 1.2.46 misses a key held under 10 frames now and then, and a second tap of a key that is still down would only lengthen it ("ll" became "l"). `tools/v1_chat.sh` measured both. A tap whose T-Deck key is still held stays down past its 12 frames. Left and right Shift press the Cybiko's Shift and Fn at once, without holding up the queue.
+
+Classic Backspace is BkSp (A.6 bit 2); `$` Backspace is Del (A.0 bit 2), which deletes forward. The Java emulator sent Backspace to Del.
+
+`$` Mic opens the menu (`rebiko_menu.c`); it cannot be rebound. The menu pauses the guest (no `cybiko_run_frame`; silence keeps the I2S clock pacing the loop) and edits a copy of the settings, applied live and saved to NVS (`rebiko_config.c`, one CRC'd blob) when it closes, if changed. USB serial input still works for scripts: ASCII as the old key mode sent it, 0x11-0x14 trackball, 0x15 Mic, 0x16 click, 0x17 hold.
 
 ### SD Card Layout
 

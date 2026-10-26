@@ -9,6 +9,11 @@
  * Serial lines:
  *   KEY 0x71 113 'q'  t=12345 ms  gap=480 ms  int=1
  *   BALL up 3 | BALL click down | BALL click up
+ *
+ * Built with -DKEYTEST_RAW (env keytest-raw) it puts the keyboard in raw
+ * mode (command 0x03): 5 bytes per poll, one per column, bit n = row n,
+ * set while held. Each change prints
+ *   RAW 00 40 00 00 00  down c1r6  t=12345
  */
 #include <Arduino.h>
 #include <SPI.h>
@@ -18,6 +23,12 @@
 #include "tdeck_pins.h"
 
 static TFT_eSPI tft;
+
+#ifdef KEYTEST_RAW
+#define KEYTEST_MODE "raw"
+#else
+#define KEYTEST_MODE "key"
+#endif
 
 static volatile int tb_up, tb_down, tb_left, tb_right;
 static void IRAM_ATTR isr_up(void)    { tb_up++; }
@@ -100,8 +111,41 @@ void setup() {
     int ack = Wire.endTransmission();
     Serial.printf("KEYTEST start, keyboard at 0x%02X %s\n", KB_I2C_ADDR,
                   ack == 0 ? "answers" : "does NOT answer");
+    // The controller keeps its mode across an ESP32 reset, and ReBiko
+    // Pocket leaves it in raw mode: set the mode this test wants.
+    Wire.beginTransmission(KB_I2C_ADDR);
+#ifdef KEYTEST_RAW
+    Wire.write(0x03);
+#else
+    Wire.write(0x04);
+#endif
+    Serial.printf("%s mode command %s\n", KEYTEST_MODE, Wire.endTransmission() == 0 ? "sent" : "failed");
     draw(ack == 0 ? "Press a key" : "Keyboard not found");
 }
+
+#ifdef KEYTEST_RAW
+static void poll_raw(uint32_t now) {
+    static uint8_t last[5];
+    uint8_t cur[5] = {};
+    int n = Wire.requestFrom(KB_I2C_ADDR, (int)5);
+    for (int i = 0; i < 5 && Wire.available(); i++) cur[i] = Wire.read();
+    if (n != 5 || memcmp(cur, last, 5) == 0) return;
+    char line[64];
+    int len = snprintf(line, sizeof line, "RAW %02X %02X %02X %02X %02X ",
+                       cur[0], cur[1], cur[2], cur[3], cur[4]);
+    for (int c = 0; c < 5; c++)
+        for (int r = 0; r < 8; r++) {
+            uint8_t bit = 1u << r;
+            if ((cur[c] ^ last[c]) & bit)
+                len += snprintf(line + len, sizeof line - len, " %s c%dr%d",
+                                (cur[c] & bit) ? "down" : "up", c, r);
+        }
+    memcpy(last, cur, 5);
+    Serial.printf("%s  t=%lu\n", line, (unsigned long)now);
+    add_history(line + 4);
+    draw(line + 4);
+}
+#endif
 
 void loop() {
     static uint32_t last_key_ms, last_poll;
@@ -116,7 +160,15 @@ void loop() {
         last_int = kint;
     }
 
+#ifdef KEYTEST_RAW
+    if (now - last_poll >= 10) {
+        last_poll = now;
+        poll_raw(now);
+    }
+    if (0) {
+#else
     if (now - last_poll >= 2) {
+#endif
         last_poll = now;
         if (Wire.requestFrom(KB_I2C_ADDR, (int)1) == 1) {
             uint8_t c = Wire.read();

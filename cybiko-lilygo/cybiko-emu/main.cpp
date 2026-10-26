@@ -23,6 +23,13 @@ extern "C" {
 
 #include "tdeck_keymap.h"
 #include "radio_sx1262.h"
+#include "rebiko_config.h"
+#include "rebiko_input.h"
+#include "rebiko_menu.h"
+
+#ifndef REBIKO_VERSION
+#define REBIKO_VERSION "dev"   // tools/version.py sets it from ../VERSION
+#endif
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -49,13 +56,12 @@ static uint16_t *disp_buf;  // 320x200 RGB565 in PSRAM
 static uint32_t blit_count = 0;
 static unsigned long emu_started_ms = 0;
 
+static rb_config_t g_cfg;   // settings (rebiko_config.h), saved in NVS
+
 // Backlight. The T-Deck's driver has 16 levels set by pulses on the BL pin:
 // high is full, and each low-high pulse steps one level down, wrapping.
-// Held low for 3 ms it turns off. $b steps through LIGHT_LEVELS, kept in NVS.
-static const uint8_t LIGHT_LEVELS[] = { 16, 12, 8, 4 };
-#define LIGHT_COUNT (sizeof LIGHT_LEVELS)
-#define LIGHT_DEFAULT 1   // 12 of 16
-static uint8_t light_idx = LIGHT_DEFAULT;
+// Held low for 3 ms it turns off. g_cfg.light picks one of LIGHT_LEVELS.
+static const uint8_t LIGHT_LEVELS[RB_LIGHT_LEVELS] = { 16, 12, 8, 4 };
 static uint8_t bl_level;  // what the driver is at now; 0 = off
 
 static void backlight_set(uint8_t level) {
@@ -81,23 +87,15 @@ static void backlight_set(uint8_t level) {
     bl_level = level;
 }
 
-static void light_load(void) {
-    Preferences p;
-    p.begin("cybiko", true);
-    light_idx = p.getUChar("light", LIGHT_DEFAULT);
-    p.end();
-    if (light_idx >= LIGHT_COUNT) light_idx = LIGHT_DEFAULT;
-}
-
 // Screen sleep: when CyOS turns its LCD off (after 5 idle minutes), the
-// backlight goes off, nothing is drawn, and the CPU drops to 160 MHz. A
-// key wakes CyOS, which turns its LCD back on, and the screen follows.
-// 160 MHz runs a sleeping CyOS ~46% busy. It does not suit the awake
-// desktop: CyOS redraws in bursts of 22-45 ms frames there, close to the
-// whole frame budget on average, so the 67 ms audio queue would run dry.
+// backlight goes off, nothing is drawn, and in the Dynamic CPU mode the
+// ESP32 drops to 160 MHz. A key wakes CyOS, which turns its LCD back on,
+// and the screen follows. 160 MHz runs a sleeping CyOS ~46% busy. It does
+// not suit the awake desktop: CyOS redraws in bursts of 22-45 ms frames
+// there, close to the whole frame budget on average, so the 67 ms audio
+// queue would run dry (rb_cpu_mhz). Display > "Screen off when CyOS
+// sleeps" turns this off.
 #define SCREEN_OFF_FRAMES 60   // CyOS blanks for a moment while booting
-#define AWAKE_MHZ  240
-#define ASLEEP_MHZ 160
 static bool screen_on = true;
 static int lcd_off_frames;
 
@@ -153,6 +151,7 @@ static void init_gray_lut(void) {
 static uint32_t render_us;  // time inside hal_render_frame, reset per report
 
 static void render_frame_body(const uint8_t *pixels, int w, int h);
+static bool emu_screen_shown(void);
 
 static void hal_render_frame(void *ctx, const uint8_t *pixels, int w, int h) {
     (void)ctx;
@@ -175,7 +174,7 @@ static bool shown_valid = false;
 static void render_frame_body(const uint8_t *pixels, int w, int h) {
     /* The 320x200 DMA blit is ~13 ms. If it is still running, skip this
      * frame; shown_frame is not updated, so a change is drawn next time. */
-    if (!screen_on || tft.dmaBusy())
+    if (!emu_screen_shown() || tft.dmaBusy())
         return;
     if (boot_unpacking() && (++blit_count % 20) != 1)
         return;
@@ -186,6 +185,16 @@ static void render_frame_body(const uint8_t *pixels, int w, int h) {
         return;
     memcpy(shown_frame, pixels, n);
     shown_valid = true;
+
+    if (g_cfg.scale == RB_SCALE_1X) {
+        // 1x, the Cybiko's own 160x100, centred in the 2x area
+        for (size_t i = 0; i < n; i++)
+            disp_buf[i] = gray_lut[pixels[i]];
+        tft.startWrite();
+        tft.pushImageDMA((SCALED_W - w) / 2, BORDER_TOP + (SCALED_H - h) / 2, w, h, disp_buf);
+        tft.endWrite();
+        return;
+    }
 
     // 2x nearest-neighbor upscale: 160x100 -> 320x200
     for (int y = 0; y < h; y++) {
@@ -206,43 +215,58 @@ static void render_frame_body(const uint8_t *pixels, int w, int h) {
 }
 
 // ---------------------------------------------------------------------------
-// Keyboard - ASCII to Cybiko matrix conversion
+// Keyboard: raw T-Deck keys -> ReBiko router -> Cybiko matrix
 // ---------------------------------------------------------------------------
 
-// Synthetic key release tracking. CyOS 1.2.46 misses a key held under
+// The keyboard runs in raw mode (I2C command 0x03): every poll returns 5
+// bytes, one per column, a bit per row, set while the key is held. The
+// router (rebiko_input.c) turns presses into Cybiko keys, typed
+// characters, commands, or menu navigation, through the key bindings.
+//
+// Typed keys are taps, one at a time. CyOS 1.2.46 misses a key held under
 // 10 frames now and then (tools/v1_chat.c: 8 frames dropped about one key
-// in four, 10 and up dropped none). Typed keys are taps, one at a time:
-// a second tap of the same key during the first would only lengthen it,
-// so "ll" came out as "l", and it needs 10 frames up before it goes down
-// again (other keys need only 3). The C3 keyboard only keeps one unread byte, so
-// I2C is drained on its own task.
+// in four, 10 and up dropped none). A second tap of the same key during
+// the first would only lengthen it, so "ll" came out as "l"; it needs 10
+// frames up before it goes down again (other keys need only 3). A key
+// still physically held when its 12 frames are up stays down until it is
+// released, so games see a held key. The Cybiko's own Shift and Fn
+// (T-Deck left and right Shift) go down at once and do not hold up the
+// queue: CyOS reads them together with the next key.
 #define MAX_ACTIVE_KEYS 16
 #define KEY_HOLD_FRAMES 12
 #define KEY_GAP_FRAMES  3     // all keys up between two taps
 #define KEY_REPEAT_GAP_FRAMES 10  // ...of the same key: 3 or 6 lost the second
-#define KEY_HOLD_STICKY (-1)  // stays down until release_key()
 #define KB_QUEUE_LEN    32
 #define TAP_QUEUE_LEN   32
+#define KB_RAW_MODE_CMD 0x03
 
 static uint16_t key_matrix[CYBIKO_KEYBOARD_COLUMNS];
+static rb_router_t router;
 
 static struct {
     int      col;
     uint16_t mask;
-    int      frames_left;
+    int      frames_left;   // minimum hold left
+    int8_t   phys;          // T-Deck input keeping it down, or -1
+    bool     blocks;        // typed keys wait for it to go up
 } active_keys[MAX_ACTIVE_KEYS];
 static int active_key_count = 0;
 
-// Fn+digit two-phase state machine
+// Fn+digit two-phase state machine (Xtreme numbers)
 static struct {
     int      letter_col;
     uint16_t letter_mask;
+    int8_t   phys;
     int      delay_frames;
 } pending_fn;
 static bool fn_pending = false;
 
 // Typed keys waiting their turn, each a key plus Shift or Fn
-static tdeck_key_event_t tap_queue[TAP_QUEUE_LEN];
+typedef struct {
+    tdeck_key_event_t ev;
+    int8_t phys;
+} tap_t;
+static tap_t tap_queue[TAP_QUEUE_LEN];
 static int tap_head, tap_count;
 static int tap_gap = KEY_REPEAT_GAP_FRAMES;   // frames since every pulsed key went up
 static tdeck_key_event_t last_tap;
@@ -252,117 +276,98 @@ static int gap_before(const tdeck_key_event_t *ev) {
            ? KEY_REPEAT_GAP_FRAMES : KEY_GAP_FRAMES;
 }
 
-static void press_key(int col, uint16_t mask) {
+static void press_key_ex(int col, uint16_t mask, int phys, bool blocks) {
     for (int i = 0; i < active_key_count; i++) {
         if (active_keys[i].col == col && active_keys[i].mask == mask) {
-            if (active_keys[i].frames_left != KEY_HOLD_STICKY)
-                active_keys[i].frames_left = KEY_HOLD_FRAMES;
+            active_keys[i].frames_left = KEY_HOLD_FRAMES;
+            if (phys >= 0) active_keys[i].phys = (int8_t)phys;
             key_matrix[col] |= mask;
             return;
         }
     }
     if (active_key_count >= MAX_ACTIVE_KEYS) {
-        /* A burst used to OR the 9th key into the matrix with no release
-         * slot, so it stuck until reboot. Drop the oldest pulsed key. */
-        int victim = 0;
-        for (int i = 0; i < active_key_count; i++) {
-            if (active_keys[i].frames_left != KEY_HOLD_STICKY) {
-                victim = i;
-                break;
-            }
-        }
-        key_matrix[active_keys[victim].col] &= ~active_keys[victim].mask;
-        active_keys[victim] = active_keys[active_key_count - 1];
+        /* A burst used to OR the 17th key into the matrix with no release
+         * slot, so it stuck until reboot. Drop the oldest key. */
+        key_matrix[active_keys[0].col] &= ~active_keys[0].mask;
+        active_keys[0] = active_keys[active_key_count - 1];
         active_key_count--;
     }
     active_keys[active_key_count].col = col;
     active_keys[active_key_count].mask = mask;
     active_keys[active_key_count].frames_left = KEY_HOLD_FRAMES;
+    active_keys[active_key_count].phys = (int8_t)phys;
+    active_keys[active_key_count].blocks = blocks;
     active_key_count++;
     key_matrix[col] |= mask;
 }
 
-static void hold_key(int col, uint16_t mask) {
-    for (int i = 0; i < active_key_count; i++) {
-        if (active_keys[i].col == col && active_keys[i].mask == mask) {
-            active_keys[i].frames_left = KEY_HOLD_STICKY;
-            key_matrix[col] |= mask;
-            return;
-        }
-    }
-    if (active_key_count < MAX_ACTIVE_KEYS) {
-        active_keys[active_key_count].col = col;
-        active_keys[active_key_count].mask = mask;
-        active_keys[active_key_count].frames_left = KEY_HOLD_STICKY;
-        active_key_count++;
-    }
-    key_matrix[col] |= mask;
+static void press_key(int col, uint16_t mask) {
+    press_key_ex(col, mask, -1, true);
 }
 
-static void release_key(int col, uint16_t mask) {
-    key_matrix[col] &= ~mask;
-    for (int i = 0; i < active_key_count; i++) {
-        if (active_keys[i].col == col && active_keys[i].mask == mask) {
-            active_keys[i] = active_keys[active_key_count - 1];
-            active_key_count--;
-            return;
-        }
-    }
+// Everything up and forgotten: the menu opened, or it closed
+static void release_all_keys(void) {
+    memset(key_matrix, 0, sizeof key_matrix);
+    active_key_count = 0;
+    tap_count = 0;
+    fn_pending = false;
+    tap_gap = KEY_REPEAT_GAP_FRAMES;
 }
 
 static bool pulsed_key_down(void) {
     for (int i = 0; i < active_key_count; i++)
-        if (active_keys[i].frames_left != KEY_HOLD_STICKY)
+        if (active_keys[i].blocks && active_keys[i].frames_left > 0)
             return true;
     return fn_pending;
 }
 
-static void press_tap(const tdeck_key_event_t *ev) {
+static void press_tap(const tap_t *t) {
+    const tdeck_key_event_t *ev = &t->ev;
     if (ev->needs_fn) {
-        press_key(ev->col, ev->mask);
+        press_key_ex(ev->col, ev->mask, -1, true);
         pending_fn.letter_col = ev->fn_col;
         pending_fn.letter_mask = ev->fn_mask;
+        pending_fn.phys = t->phys;
         pending_fn.delay_frames = 3;
         fn_pending = true;
     } else {
         if (ev->needs_shift)
-            press_key(TDECK_SHIFT_COL, TDECK_SHIFT_MASK);
-        press_key(ev->col, ev->mask);
+            press_key_ex(TDECK_SHIFT_COL, TDECK_SHIFT_MASK, -1, true);
+        press_key_ex(ev->col, ev->mask, t->phys, true);
     }
     last_tap = *ev;
     tap_gap = 0;
 }
 
-static void queue_tap(const tdeck_key_event_t *ev) {
+static void queue_tap(const tdeck_key_event_t *ev, int phys) {
+    tap_t t = { *ev, (int8_t)phys };
     if (tap_count == 0 && !pulsed_key_down() && tap_gap >= gap_before(ev)) {
-        press_tap(ev);
+        press_tap(&t);
         return;
     }
     if (tap_count == TAP_QUEUE_LEN)
         return;   // typing far ahead of the guest; drop the newest
-    tap_queue[(tap_head + tap_count) % TAP_QUEUE_LEN] = *ev;
+    tap_queue[(tap_head + tap_count) % TAP_QUEUE_LEN] = t;
     tap_count++;
 }
 
 static void keyboard_tick_frame(void) {
     for (int i = 0; i < active_key_count; ) {
-        if (active_keys[i].frames_left == KEY_HOLD_STICKY) {
+        if (active_keys[i].frames_left > 0)
+            active_keys[i].frames_left--;
+        if (active_keys[i].frames_left > 0
+            || rb_router_held(&router, active_keys[i].phys)) {
             i++;
             continue;
         }
-        active_keys[i].frames_left--;
-        if (active_keys[i].frames_left <= 0) {
-            key_matrix[active_keys[i].col] &= ~active_keys[i].mask;
-            active_keys[i] = active_keys[active_key_count - 1];
-            active_key_count--;
-        } else {
-            i++;
-        }
+        key_matrix[active_keys[i].col] &= ~active_keys[i].mask;
+        active_keys[i] = active_keys[active_key_count - 1];
+        active_key_count--;
     }
     if (fn_pending) {
         pending_fn.delay_frames--;
         if (pending_fn.delay_frames <= 0) {
-            press_key(pending_fn.letter_col, pending_fn.letter_mask);
+            press_key_ex(pending_fn.letter_col, pending_fn.letter_mask, pending_fn.phys, true);
             fn_pending = false;
         }
     }
@@ -372,23 +377,17 @@ static void keyboard_tick_frame(void) {
     }
     if (tap_gap < KEY_REPEAT_GAP_FRAMES)
         tap_gap++;
-    if (tap_count > 0 && tap_gap >= gap_before(&tap_queue[tap_head])) {
+    if (tap_count > 0 && tap_gap >= gap_before(&tap_queue[tap_head].ev)) {
         press_tap(&tap_queue[tap_head]);
         tap_head = (tap_head + 1) % TAP_QUEUE_LEN;
         tap_count--;
     }
 }
 
-static void process_ascii_key(char c) {
-    tdeck_key_event_t ev;
-    if (!tdeck_map_ascii(c, &ev)) return;
-    queue_tap(&ev);
-}
-
 // Trackball pulse counting via interrupts.
 // The trackball generates brief LOW pulses per step — too short to
 // reliably catch by polling at ~20fps.  ISRs count every pulse, then
-// poll_input() converts accumulated counts into synthetic held presses.
+// poll_input() converts accumulated counts into router events.
 #define TRACKBALL_CLICK_DEBOUNCE_MS 30
 #define TRACKBALL_ESC_MS            600
 static volatile int tb_up_count    = 0;
@@ -430,31 +429,34 @@ extern "C" uint32_t cybiko_split[3];
 static void volume_step(int by);
 static void volume_done(void);
 static void volume_note(char *buf, size_t n);
+static void light_step(void);
+static void menu_toggle(rb_screen_t first);
+static void menu_input(int result);
+static rb_menu_t menu;
 
-static void press_special(tdeck_special_key_t k) {
-    tdeck_key_event_t ev = {};
-    if (tdeck_map_special(k, &ev.col, &ev.mask))
-        queue_tap(&ev);
-}
-
-// The T-Deck has no Esc, F1-F7, Help, Select, Insert or Delete. $ is a
-// command key: $ then a letter sends one of them ($x = Esc). $p and $m
-// turn the volume up and down, and start volume mode: more p and m keep
-// stepping it until 2 s pass without one. Any other key ends volume mode
-// and is typed as usual.
+// $ is the command key: $ then a key is a combination from the bindings
+// ($x = Esc, $q-$u = F1-F7, $ Mic = the ReBiko menu, $ Space = the key
+// reference). $p and $m turn the volume up and down and start volume
+// mode: more p and m keep stepping it until 2 s pass without one. Any
+// other key ends volume mode and is typed as usual.
 #define VOLUME_MODE_MS 2000
 static bool cmd_pending;
 static unsigned long volume_until;   // volume mode ends at this millis(); 0 = off
 static char chrome_top[40] = "ReBiko Pocket";
 
-/* $l: a range test. The bottom line shows what this radio hears, and a
- * ping goes out every second on the ping channel (CyOS ignores it) for
- * modem_tool on the PC to count. Green: hearing everything; yellow: some
- * lost; red: nothing heard for 5 s. */
+/* Link view: a range test. The bottom line shows what this radio hears,
+ * and a ping goes out every second on the ping channel (CyOS ignores it)
+ * for modem_tool on the PC to count. Green: hearing everything; yellow:
+ * some lost; red: nothing heard for 5 s. */
 #define LINK_PING_MS 1000
 static bool link_view;
 static uint32_t link_ping_at, link_ping_seq;
 static uint32_t link_rx_seen, link_rx_at;
+
+// The emulator's screen is showing (not asleep, not under the menu)
+static bool emu_screen_shown(void) {
+    return screen_on && !rb_menu_is_open(&menu);
+}
 
 static void draw_link_line(void) {
     const cybiko_lora_t *lk = cybiko_sx1262_link();
@@ -491,7 +493,7 @@ static void link_tick(uint32_t now) {
         int n = snprintf(msg, sizeof msg, "PING %lu from T-Deck", (unsigned long)link_ping_seq++);
         t->send_packet(t, (const uint8_t *)msg, (size_t)n, CYBIKO_LORA_PING_CHANNEL);
     }
-    if (!screen_on)
+    if (!emu_screen_shown())
         return;
     tft.dmaWait();
     tft.fillRect(0, BORDER_BOTTOM, SCALED_W, 240 - BORDER_BOTTOM, TFT_BLACK);
@@ -499,7 +501,7 @@ static void link_tick(uint32_t now) {
 }
 
 static void draw_chrome(void) {
-    if (!screen_on)
+    if (!emu_screen_shown())
         return;
     tft.dmaWait();
     tft.fillRect(0, 0, SCALED_W, BORDER_TOP, TFT_BLACK);
@@ -523,135 +525,185 @@ static void draw_chrome(void) {
         return;
     }
     tft.setTextColor(cmd_pending ? TFT_YELLOW : TFT_DARKGREY, TFT_BLACK);
-    tft.drawString(cmd_pending ? "$x Esc  $h Help  $q-u F1-7  $p/m Vol" :
-                                 "$ then x=Esc h=Help q-u=F1-7 p/m=Vol",
+    tft.drawString(cmd_pending ? "$x Esc  $Mic Menu  $Space Keys" :
+                                 "$ then x=Esc  Mic=Menu  Space=Keys",
                    4, BORDER_BOTTOM + 2, 2);
 }
 
-static void show_cmd(bool on) {
-    (void)on;
-    draw_chrome();
+// ---- router outputs ----
+
+// Matrix position of a ReBiko Cybiko key on this machine
+static bool cybiko_key_event(int ck, tdeck_key_event_t *ev) {
+    tdeck_special_key_t sp;
+    char ascii = 0;
+    memset(ev, 0, sizeof *ev);
+    ev->found = true;
+    switch (ck) {
+    case RB_CK_ENTER: ev->col = TDECK_ENTER_COL;     ev->mask = TDECK_ENTER_MASK;     return true;
+    case RB_CK_UP:    ev->col = TDECK_PAD_UP_COL;    ev->mask = TDECK_PAD_UP_MASK;    return true;
+    case RB_CK_DOWN:  ev->col = TDECK_PAD_DOWN_COL;  ev->mask = TDECK_PAD_DOWN_MASK;  return true;
+    case RB_CK_LEFT:  ev->col = TDECK_PAD_LEFT_COL;  ev->mask = TDECK_PAD_LEFT_MASK;  return true;
+    case RB_CK_RIGHT: ev->col = TDECK_PAD_RIGHT_COL; ev->mask = TDECK_PAD_RIGHT_MASK; return true;
+    case RB_CK_SHIFT: ev->col = TDECK_SHIFT_COL;     ev->mask = TDECK_SHIFT_MASK;     return true;
+    case RB_CK_FN:    ev->col = TDECK_FN_COL;        ev->mask = TDECK_FN_MASK;        return true;
+    case RB_CK_ESC:    sp = TDECK_KEY_ESC; break;
+    case RB_CK_BKSP:   sp = TDECK_KEY_BKSP; break;
+    case RB_CK_DEL:    sp = TDECK_KEY_DELETE; break;
+    case RB_CK_INSERT: sp = TDECK_KEY_INSERT; break;
+    case RB_CK_SELECT: sp = TDECK_KEY_SELECT; break;
+    case RB_CK_HELP:   sp = TDECK_KEY_HELP; break;
+    case RB_CK_TAB:    sp = TDECK_KEY_TAB; break;
+    case RB_CK_F1: case RB_CK_F2: case RB_CK_F3: case RB_CK_F4:
+    case RB_CK_F5: case RB_CK_F6: case RB_CK_F7:
+        sp = (tdeck_special_key_t)(TDECK_KEY_F1 + (ck - RB_CK_F1));
+        break;
+    case RB_CK_SPACE:      ascii = ' '; break;
+    case RB_CK_LBRACKET:   ascii = '['; break;
+    case RB_CK_RBRACKET:   ascii = ']'; break;
+    case RB_CK_BACKSLASH:  ascii = '\\'; break;
+    case RB_CK_BACKTICK:   ascii = '`'; break;
+    case RB_CK_EQUALS:     ascii = '='; break;
+    case RB_CK_APOSTROPHE: ascii = '\''; break;
+    case RB_CK_SEMICOLON:  ascii = ';'; break;
+    case RB_CK_SLASH:      ascii = '/'; break;
+    default: return false;
+    }
+    if (ascii) {
+        // these keys are not found on the Xtreme, which lacks them
+        if (!tdeck_map_ascii(ascii, ev)) return false;
+        ev->needs_shift = false;
+        return true;
+    }
+    return tdeck_map_special(sp, &ev->col, &ev->mask);
 }
 
-static void handle_key(char c) {
+static void out_cybiko_key(void *ctx, int ck, int phys) {
+    (void)ctx;
+    tdeck_key_event_t ev;
     boot_done = true;   // someone is using it: back to real time
+    if (volume_until) volume_done();
+    if (!cybiko_key_event(ck, &ev)) return;
+    if (ck == RB_CK_SHIFT || ck == RB_CK_FN) {
+        // the Cybiko's own modifier keys: down now, up with the T-Deck key
+        press_key_ex(ev.col, ev.mask, phys, false);
+    } else if (phys >= RB_PK_BALL_UP && phys < RB_PK_COUNT) {
+        // trackball: pressed directly, as it always was; the hold (Esc)
+        // stays down until the ball is let go
+        press_key_ex(ev.col, ev.mask, phys == RB_PK_BALL_HOLD ? phys : -1, true);
+    } else {
+        queue_tap(&ev, phys);
+    }
+}
+
+static void out_type_char(void *ctx, char c, int phys) {
+    (void)ctx;
+    boot_done = true;
     if (volume_until) {
         if (c == 'p' || c == 'P') { volume_step(+1); return; }
         if (c == 'm' || c == 'M') { volume_step(-1); return; }
         volume_done();   // then type the key as usual
     }
-    if (cmd_pending) {
-        cmd_pending = false;
-        show_cmd(false);
-        switch (c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c) {
-        case 'x': press_special(TDECK_KEY_ESC); break;
-        case 'h': press_special(TDECK_KEY_HELP); break;
-        case 's': press_special(TDECK_KEY_SELECT); break;
-        case 'i': press_special(TDECK_KEY_INSERT); break;
-        case 'd': press_special(TDECK_KEY_DELETE); break;
-        case 'g': press_special(TDECK_KEY_TAB); break;
-        case 'q': press_special(TDECK_KEY_F1); break;
-        case 'w': press_special(TDECK_KEY_F2); break;
-        case 'e': press_special(TDECK_KEY_F3); break;
-        case 'r': press_special(TDECK_KEY_F4); break;
-        case 't': press_special(TDECK_KEY_F5); break;
-        case 'y': press_special(TDECK_KEY_F6); break;
-        case 'u': press_special(TDECK_KEY_F7); break;
-        case 'p': volume_step(+1); break;
-        case 'm': volume_step(-1); break;
-        case 'b': {
-            light_idx = (light_idx + 1) % LIGHT_COUNT;
-            backlight_set(LIGHT_LEVELS[light_idx]);
-            Preferences p;
-            p.begin("cybiko", false);
-            p.putUChar("light", light_idx);
-            p.end();
-            snprintf(chrome_top, sizeof chrome_top, "backlight %u/%u",
-                     (unsigned)(LIGHT_COUNT - light_idx), (unsigned)LIGHT_COUNT);
-            draw_chrome();
-            break;
-        }
-        case 'l':
-            link_view = !link_view;
-            link_ping_at = millis();
-            draw_chrome();
-            break;
-        case '$': process_ascii_key('$'); break;
-        default: break;   // anything else cancels
-        }
+    tdeck_key_event_t ev;
+    if (tdeck_map_ascii(c, &ev))
+        queue_tap(&ev, phys);
+}
+
+static void out_command(void *ctx, int cmd) {
+    (void)ctx;
+    if (volume_until && cmd != RB_CMD_VOL_UP && cmd != RB_CMD_VOL_DOWN)
+        volume_done();
+    switch (cmd) {
+    case RB_CMD_MENU:      menu_toggle(RB_SCR_MAIN); break;
+    case RB_CMD_KEYREF:    menu_toggle(RB_SCR_KEYREF); break;
+    case RB_CMD_VOL_UP:    volume_step(+1); break;
+    case RB_CMD_VOL_DOWN:  volume_step(-1); break;
+    case RB_CMD_BACKLIGHT: light_step(); break;
+    case RB_CMD_LINK_VIEW:
+        link_view = !link_view;
+        link_ping_at = millis();
+        draw_chrome();
+        break;
+    }
+}
+
+static void out_menu_nav(void *ctx, rb_nav_t nav) {
+    (void)ctx;
+    menu_input(rb_menu_nav(&menu, nav));
+}
+
+static void out_capture(void *ctx, rb_chord_t c) {
+    (void)ctx;
+    menu_input(rb_menu_capture(&menu, c));
+}
+
+static void out_dollar(void *ctx, bool pending) {
+    (void)ctx;
+    cmd_pending = pending;
+    draw_chrome();
+}
+
+static QueueHandle_t kb_queue;   // raw key changes: physical id | 0x80 if down
+static bool kb_raw_ok;
+
+// Raw mode: one byte per column, bit n = row n, set while held
+static void keyboard_poll_raw(void) {
+    static uint8_t last[5];
+    uint8_t cur[5];
+    if (Wire.requestFrom(KB_I2C_ADDR, (int)5) != 5)
         return;
-    }
-    if (c == '$') {
-        cmd_pending = true;
-        show_cmd(true);
-    } else {
-        process_ascii_key(c);
+    for (int i = 0; i < 5; i++)
+        cur[i] = (uint8_t)Wire.read();
+    for (int col = 0; col < 5; col++) {
+        uint8_t diff = (cur[col] ^ last[col]) & 0x7F;
+        for (int row = 0; diff && row < 7; row++) {
+            if (!(diff & (1u << row))) continue;
+            uint8_t ev = (uint8_t)(RB_PK(col, row) | ((cur[col] >> row & 1) ? 0x80 : 0));
+            xQueueSend(kb_queue, &ev, 0);
+        }
+        last[col] = cur[col];
     }
 }
 
-static QueueHandle_t kb_queue;
-
-static int keyboard_drain_i2c(void) {
-    int got = 0;
-    for (int i = 0; i < 8; i++) {
-        int n = Wire.requestFrom(KB_I2C_ADDR, (int)1);
-        if (n <= 0 || Wire.available() <= 0)
-            break;
-        uint8_t c = (uint8_t)Wire.read();
-        if (c == 0x00 || c == 0xFF)
-            break;
-        if (kb_queue)
-            xQueueSend(kb_queue, &c, 0);
-        else
-            handle_key((char)c);
-        got++;
-    }
-    return got;
-}
-
-/* The C3 keyboard holds one unread byte. Polling it only once per emulator
- * frame dropped keys whenever radio or a DMA blit stretched a frame past
- * the next press. This task keeps the I2C FIFO empty. */
+/* The controller scans its matrix about every 35 ms; polling every 5 ms
+ * on this task catches each change without the emulator loop waiting on
+ * I2C. */
 static void keyboard_task(void *arg) {
     (void)arg;
     for (;;) {
-        int got;
-        do {
-            got = keyboard_drain_i2c();
-        } while (got >= 8);
-        bool pending = digitalRead(PIN_KB_INT) == LOW;
-        vTaskDelay(pdMS_TO_TICKS(pending ? 2 : 5));
+        keyboard_poll_raw();
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
 
 static void poll_input(void) {
-    if (!kb_queue)
-        keyboard_drain_i2c();
-    uint8_t queued;
-    while (kb_queue && xQueueReceive(kb_queue, &queued, 0) == pdTRUE) {
-        static int kb_log = 0;
+    uint8_t ev;
+    while (kb_queue && xQueueReceive(kb_queue, &ev, 0) == pdTRUE) {
 #ifdef CYBIKO_KEYLOG
-        Serial.printf("KEY 0x%02X %3u '%c'\n", queued, queued,
-                      queued >= 0x20 && queued < 0x7F ? queued : '.');
-#else
-        if (kb_log < 16) {
-            Serial.printf("kb %02X\n", queued);
-            kb_log++;
-        }
+        Serial.printf("KEY %s %s\n", rb_phys_name(ev & 0x7F), (ev & 0x80) ? "down" : "up");
 #endif
-        handle_key((char)queued);
+        rb_router_key(&router, ev & 0x7F, (ev & 0x80) != 0);
     }
 
-    // Keys from the USB serial port, for scripted tests: ASCII as from the
-    // T-Deck keyboard, and 0x11-0x14 for trackball up/down/left/right.
+    // Keys from the USB serial port, for scripted tests: ASCII as the old
+    // key mode sent it ($ prefix included), 0x11-0x14 for trackball
+    // up/down/left/right, 0x15 Mic, 0x16 a ball click, 0x17 a ball hold.
     while (Serial.available() > 0) {
         int c = Serial.read();
         switch (c) {
-        case 0x11: press_key(TDECK_PAD_UP_COL, TDECK_PAD_UP_MASK); break;
-        case 0x12: press_key(TDECK_PAD_DOWN_COL, TDECK_PAD_DOWN_MASK); break;
-        case 0x13: press_key(TDECK_PAD_LEFT_COL, TDECK_PAD_LEFT_MASK); break;
-        case 0x14: press_key(TDECK_PAD_RIGHT_COL, TDECK_PAD_RIGHT_MASK); break;
-        default:   if (c > 0) handle_key((char)c); break;
+        case 0x11: rb_router_ball(&router, RB_PK_BALL_UP, true); break;
+        case 0x12: rb_router_ball(&router, RB_PK_BALL_DOWN, true); break;
+        case 0x13: rb_router_ball(&router, RB_PK_BALL_LEFT, true); break;
+        case 0x14: rb_router_ball(&router, RB_PK_BALL_RIGHT, true); break;
+        case 0x15:
+            rb_router_key(&router, RB_PK_MIC, true);
+            rb_router_key(&router, RB_PK_MIC, false);
+            break;
+        case 0x16: rb_router_ball(&router, RB_PK_BALL_CLICK, true); break;
+        case 0x17:
+            rb_router_ball(&router, RB_PK_BALL_HOLD, true);
+            rb_router_ball(&router, RB_PK_BALL_HOLD, false);
+            break;
+        default:   if (c > 0) rb_router_char(&router, (char)c); break;
         }
     }
 
@@ -663,26 +715,26 @@ static void poll_input(void) {
     int right = tb_right_count; tb_right_count = 0;
     interrupts();
 
-    // Convert pulses into synthetic held key presses
-    if (up > 0)    press_key(TDECK_PAD_UP_COL, TDECK_PAD_UP_MASK);
-    if (down > 0)  press_key(TDECK_PAD_DOWN_COL, TDECK_PAD_DOWN_MASK);
-    if (left > 0)  press_key(TDECK_PAD_LEFT_COL, TDECK_PAD_LEFT_MASK);
-    if (right > 0) press_key(TDECK_PAD_RIGHT_COL, TDECK_PAD_RIGHT_MASK);
+    if (up > 0)    rb_router_ball(&router, RB_PK_BALL_UP, true);
+    if (down > 0)  rb_router_ball(&router, RB_PK_BALL_DOWN, true);
+    if (left > 0)  rb_router_ball(&router, RB_PK_BALL_LEFT, true);
+    if (right > 0) rb_router_ball(&router, RB_PK_BALL_RIGHT, true);
     if (up | down | left | right)
         boot_done = true;
 
-    /* A click shorter than 600 ms is Enter, the key CyOS uses to leave
-     * the welcome pages and to open an icon (Select does not launch).
-     * Holding the ball down that long is Esc, which the T-Deck keyboard
-     * lacks. Enter is sent on release so a hold does not also open
-     * something. Esc stays down for the rest of the hold: a 4-frame pulse
-     * was too short for CyOS 1.2.46's scan, and bounce on GPIO 0 turned a
-     * hold into Enter. The click ISR timestamps the press so a slow frame
-     * cannot restart the hold timer. */
+    /* A click shorter than 600 ms is the click (Enter by default, the key
+     * CyOS uses to leave the welcome pages and to open an icon; Select
+     * does not launch). Holding the ball down that long is the hold (Esc
+     * by default, which the T-Deck keyboard lacks; Back in the menu).
+     * The click is sent on release, so a hold never also clicks; the hold
+     * stays down for the rest of it: a 4-frame pulse was too short for
+     * CyOS 1.2.46's scan, and bounce on GPIO 0 turned a hold into Enter.
+     * The click ISR timestamps the press so a slow frame cannot restart
+     * the hold timer. */
     static uint32_t click_since;
     static uint32_t click_up_since;
     static bool click_down;
-    static bool esc_held;
+    static bool hold_sent;
     bool raw = !digitalRead(PIN_TRACKBALL_CLICK);
     uint32_t now = millis();
     if (!now) now = 1;
@@ -704,27 +756,22 @@ static void poll_input(void) {
         click_since = isr_down_ms ? isr_down_ms : now;
         if (now - click_since > 2000)
             click_since = now;
-        esc_held = false;
+        hold_sent = false;
         boot_done = true;
     } else if (!raw && click_down) {
         click_down = false;
-        if (esc_held) {
-            int col; uint16_t mask;
-            if (tdeck_map_special(TDECK_KEY_ESC, &col, &mask))
-                release_key(col, mask);
-            esc_held = false;
+        if (hold_sent) {
+            rb_router_ball(&router, RB_PK_BALL_HOLD, false);
+            hold_sent = false;
         } else if (click_since && now - click_since >= TRACKBALL_CLICK_DEBOUNCE_MS) {
-            press_key(TDECK_ENTER_COL, TDECK_ENTER_MASK);
+            rb_router_ball(&router, RB_PK_BALL_CLICK, true);
         }
         click_since = 0;
     }
-    if (click_down && !esc_held && click_since && now - click_since >= TRACKBALL_ESC_MS) {
-        int col; uint16_t mask;
-        if (tdeck_map_special(TDECK_KEY_ESC, &col, &mask)) {
-            hold_key(col, mask);
-            esc_held = true;
-            Serial.println("trackball Esc");
-        }
+    if (click_down && !hold_sent && click_since && now - click_since >= TRACKBALL_ESC_MS) {
+        hold_sent = true;
+        rb_router_ball(&router, RB_PK_BALL_HOLD, true);
+        Serial.println("trackball hold");
     }
 }
 
@@ -754,38 +801,30 @@ static bool i2s_initialized = false;
 static QueueHandle_t i2s_events;
 static uint32_t i2s_underruns;  // DMA ran dry: an audible gap
 
-// The T-Deck has no volume knob. $p and $m step the level up and down,
-// from 0 (off) to 10; the level is kept in NVS. Gain is 256 for
-// full scale, which was too loud on the T-Deck's amplifier.
+// The T-Deck has no volume knob. $p and $m (or Audio in the menu) step
+// the level, g_cfg.volume, from 0 (off) to 10. Gain is 256 for full
+// scale, which was too loud on the T-Deck's amplifier. Sound off keeps
+// the level and sends silence: the I2S clock still paces the emulator.
 //   level  0  1  2  3   4   5   6   7   8   9   10
 //   %      0  3  6  9  12  18  25  37  50  75  100
 static const uint16_t VOLUME_Q8[] = { 0, 8, 15, 23, 31, 46, 64, 95, 128, 192, 256 };
 #define VOLUME_MAX (sizeof VOLUME_Q8 / sizeof VOLUME_Q8[0] - 1)
-#define VOLUME_DEFAULT 8   // 50%
-static uint8_t volume_idx = VOLUME_DEFAULT;
-static uint8_t volume_saved = VOLUME_DEFAULT;
-
-static void volume_load(void) {
-    Preferences p;
-    p.begin("cybiko", true);
-    // "vol" held an index into the old 5-step table; this is a new key.
-    volume_idx = p.getUChar("level", VOLUME_DEFAULT);
-    p.end();
-    if (volume_idx > VOLUME_MAX) volume_idx = VOLUME_DEFAULT;
-    volume_saved = volume_idx;
-}
-
 static void volume_note(char *buf, size_t n) {
-    if (volume_idx)
-        snprintf(buf, n, "volume %u", volume_idx);
+    if (!g_cfg.audio_on)
+        snprintf(buf, n, "sound off");
+    else if (g_cfg.volume)
+        snprintf(buf, n, "volume %u", g_cfg.volume);
     else
-        snprintf(buf, n, "volume off");
+        snprintf(buf, n, "volume 0");
 }
+
+static void save_config(void);
 
 // Takes effect at once; NVS is written once volume mode ends.
 static void volume_step(int by) {
-    int v = volume_idx + by;
-    volume_idx = v < 0 ? 0 : v > (int)VOLUME_MAX ? VOLUME_MAX : v;
+    int v = g_cfg.volume + by;
+    g_cfg.volume = (uint8_t)(v < 0 ? 0 : v > (int)VOLUME_MAX ? VOLUME_MAX : v);
+    if (by > 0) g_cfg.audio_on = 1;
     volume_until = millis() + VOLUME_MODE_MS;
     if (!volume_until) volume_until = 1;   // 0 means off
     draw_chrome();
@@ -796,13 +835,7 @@ static void volume_step(int by) {
 
 static void volume_done(void) {
     volume_until = 0;
-    if (volume_idx != volume_saved) {
-        Preferences p;
-        p.begin("cybiko", false);
-        p.putUChar("level", volume_idx);
-        p.end();
-        volume_saved = volume_idx;
-    }
+    save_config();
     draw_chrome();
 }
 
@@ -836,7 +869,6 @@ static void init_i2s(void) {
     }
 
     i2s_initialized = true;
-    volume_load();
 }
 
 static void count_i2s_underruns(void) {
@@ -855,7 +887,7 @@ static void hal_audio_output(void *ctx, const uint8_t *samples, int count) {
     if (!i2s_initialized || count <= 0) return;
 
     int n = (count > 1024) ? 1024 : count;
-    int gain = VOLUME_Q8[volume_idx];   // 256 = the old full level
+    int gain = g_cfg.audio_on ? VOLUME_Q8[g_cfg.volume] : 0;   // 256 = the old full level
     bool silent = true;
     for (int i = 0; i < n; i++) {
         silent &= samples[i] == 128;
@@ -1304,6 +1336,292 @@ static void diag_spi(const char *when) {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// Settings and the ReBiko menu ($ + Mic)
+// ---------------------------------------------------------------------------
+
+// Settings live in NVS ("cybiko"/"cfg") as one blob (rebiko_config.h). It
+// is written only when a change is committed (the menu closes, volume
+// mode ends, $ backlight) and only if it differs from what is stored.
+static uint8_t cfg_stored[RB_CONFIG_BLOB_MAX];
+static size_t cfg_stored_len;
+
+static void save_config(void) {
+    uint8_t blob[RB_CONFIG_BLOB_MAX];
+    size_t n = rb_config_pack(&g_cfg, blob, sizeof blob);
+    if (!n || (n == cfg_stored_len && memcmp(blob, cfg_stored, n) == 0))
+        return;
+    Preferences p;
+    p.begin("cybiko", false);
+    bool ok = p.putBytes("cfg", blob, n) == n;
+    p.end();
+    if (ok) {
+        memcpy(cfg_stored, blob, n);
+        cfg_stored_len = n;
+    }
+    Serial.printf("settings %s (%u bytes)\n", ok ? "saved" : "save FAILED", (unsigned)n);
+}
+
+static void load_config(void) {
+    static const char *const STATUS[] = { "ok", "none stored", "damaged, defaults", "repaired" };
+    uint8_t blob[RB_CONFIG_BLOB_MAX];
+    size_t n = 0;
+    Preferences p;
+    p.begin("cybiko", true);
+    size_t want = p.getBytesLength("cfg");
+    if (want && want <= sizeof blob)
+        n = p.getBytes("cfg", blob, want);
+    // Before the settings blob, volume ("level") and backlight ("light")
+    // had keys of their own
+    uint8_t old_volume = p.getUChar("level", 0xFF), old_light = p.getUChar("light", 0xFF);
+    p.end();
+    rb_cfg_status_t st = rb_config_unpack(&g_cfg, n ? blob : NULL, n);
+    Serial.printf("settings: %s\n", STATUS[st]);
+    if (st == RB_CFG_OK) {
+        memcpy(cfg_stored, blob, n);
+        cfg_stored_len = n;
+        return;
+    }
+    if (st == RB_CFG_MISSING) {
+        if (old_volume <= RB_VOLUME_MAX) g_cfg.volume = old_volume;
+        if (old_light < RB_LIGHT_LEVELS) g_cfg.light = old_light;
+        if (old_volume == 0xFF && old_light == 0xFF) return;   // first boot
+    }
+    save_config();   // migrated or repaired: store the fixed copy
+}
+
+static void apply_cpu_clock(void) {
+    uint32_t mhz = (uint32_t)rb_cpu_mhz(g_cfg.cpu_mode, screen_on || rb_menu_is_open(&menu));
+    if (getCpuFrequencyMhz() != mhz)
+        setCpuFrequencyMhz(mhz);
+}
+
+// Make the hardware match g_cfg (backlight, clock, scale; volume and
+// bindings are read where they are used)
+static void apply_config(void) {
+    static uint8_t shown_scale = RB_SCALE_2X;
+    if (screen_on || rb_menu_is_open(&menu))
+        backlight_set(LIGHT_LEVELS[g_cfg.light]);
+    apply_cpu_clock();
+    if (g_cfg.scale != shown_scale) {
+        shown_scale = g_cfg.scale;
+        shown_valid = false;
+        if (emu_screen_shown()) {
+            tft.dmaWait();
+            tft.fillRect(0, BORDER_TOP, SCALED_W, SCALED_H, TFT_BLACK);
+        }
+    }
+}
+
+static void light_step(void) {
+    g_cfg.light = (uint8_t)((g_cfg.light + 1) % RB_LIGHT_LEVELS);
+    apply_config();
+    save_config();
+    snprintf(chrome_top, sizeof chrome_top, "backlight %u/%u",
+             (unsigned)(RB_LIGHT_LEVELS - g_cfg.light), (unsigned)RB_LIGHT_LEVELS);
+    draw_chrome();
+}
+
+// ---- menu hooks ----
+
+static void hook_apply(void *ctx, const rb_config_t *c) {
+    (void)ctx;
+    g_cfg = *c;
+    apply_config();
+}
+
+static int hook_info_count(void *ctx) {
+    (void)ctx;
+    return 12;
+}
+
+static void hook_info_row(void *ctx, int i, char *l, size_t ln, char *v, size_t vn) {
+    (void)ctx;
+    switch (i) {
+    case 0: snprintf(l, ln, "ReBiko Pocket"); snprintf(v, vn, "%s", REBIKO_VERSION); break;
+#ifdef CYBIKO_MACHINE_V1
+    case 1: snprintf(l, ln, "Machine"); snprintf(v, vn, "Cybiko Classic"); break;
+#else
+    case 1: snprintf(l, ln, "Machine"); snprintf(v, vn, "Cybiko Xtreme"); break;
+#endif
+    case 2: snprintf(l, ln, "Chip");
+            snprintf(v, vn, "%s rev %d", ESP.getChipModel(), (int)ESP.getChipRevision()); break;
+    case 3: snprintf(l, ln, "CPU now"); snprintf(v, vn, "%lu MHz", (unsigned long)getCpuFrequencyMhz()); break;
+    case 4: snprintf(l, ln, "PSRAM"); snprintf(v, vn, "%lu KB", (unsigned long)(ESP.getPsramSize() >> 10)); break;
+    case 5: snprintf(l, ln, "Flash"); snprintf(v, vn, "%lu MB", (unsigned long)(ESP.getFlashChipSize() >> 20)); break;
+    case 6: snprintf(l, ln, "Free RAM"); snprintf(v, vn, "%lu KB", (unsigned long)(ESP.getFreeHeap() >> 10)); break;
+    case 7: snprintf(l, ln, "SD card"); snprintf(v, vn, "%llu MB", (unsigned long long)(SD.cardSize() >> 20)); break;
+    case 8: snprintf(l, ln, "Radio");
+            snprintf(v, vn, "%s", cybiko_sx1262_link() ? "915 MHz SF7 22 dBm" : cybiko_sx1262_last_error()); break;
+    case 9: snprintf(l, ln, "CyID"); snprintf(v, vn, "%08lX", (unsigned long)cybiko_sx1262_device_id()); break;
+    case 10: snprintf(l, ln, "Battery"); snprintf(v, vn, "%.2f V %s %d%%", bat_mv / 1000.0f, bat_src_tag(), bat_pct); break;
+    case 11: snprintf(l, ln, "Keyboard"); snprintf(v, vn, "%s", kb_raw_ok ? "raw mode" : "no answer"); break;
+    }
+}
+
+static void hook_restart(void *ctx, const rb_config_t *c) {
+    (void)ctx;
+    g_cfg = *c;
+    save_config();
+    save_nvram(emu);
+    Serial.println("restart from the menu");
+    Serial.flush();
+    delay(100);
+    ESP.restart();
+}
+
+static bool hook_link_view(void *ctx) { (void)ctx; return link_view; }
+static void hook_set_link_view(void *ctx, bool on) {
+    (void)ctx;
+    link_view = on;
+    link_ping_at = millis();
+}
+
+// ---- menu drawing ----
+
+#define MENU_BG      0x0000
+#define MENU_PANEL   0x10A2   // dark slate
+#define MENU_ACCENT  0x07FF   // cyan
+#define MENU_SELECT  0x0410   // teal
+#define MENU_TEXT    0xFFFF
+#define MENU_VALUE   0x973C   // pale cyan
+#define MENU_DIM     0x8410
+#define MENU_ROW_H   22
+
+static bool menu_dirty;
+
+// Cut text to fit max_w pixels in font 2, ending in ".." if it was cut
+static void fit_text(char *s, int max_w) {
+    size_t n = strlen(s);
+    if (tft.textWidth(s, 2) <= max_w) return;
+    while (n > 2) {
+        s[--n] = 0;
+        s[n - 1] = '.';
+        s[n - 2] = '.';
+        if (tft.textWidth(s, 2) <= max_w) return;
+    }
+}
+
+static void draw_menu(void) {
+    tft.dmaWait();
+    tft.fillScreen(MENU_BG);
+    tft.fillRect(0, 0, 320, 24, MENU_PANEL);
+    tft.drawFastHLine(0, 24, 320, MENU_ACCENT);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(MENU_ACCENT, MENU_PANEL);
+    tft.drawString("REBIKO", 8, 4, 2);
+    char title[48];
+    snprintf(title, sizeof title, "%s", rb_menu_title(&menu));
+    fit_text(title, 220);
+    tft.setTextColor(MENU_TEXT, MENU_PANEL);
+    tft.setTextDatum(TR_DATUM);
+    tft.drawString(title, 312, 4, 2);
+    tft.setTextDatum(TL_DATUM);
+
+    int y = 32;
+    for (int i = 0; i < 3; i++) {
+        const char *line = rb_menu_line(&menu, i);
+        if (!line[0]) continue;
+        tft.setTextColor(i == 0 ? MENU_TEXT : MENU_VALUE, MENU_BG);
+        tft.drawString(line, 10, y, 2);
+        y += 18;
+    }
+    if (y > 32) y += 8;
+
+    int rows = rb_menu_rows(&menu), top = rb_menu_top(&menu), cur = rb_menu_cursor(&menu);
+    int fit = (214 - y) / MENU_ROW_H;
+    if (fit > RB_MENU_VISIBLE) fit = RB_MENU_VISIBLE;
+    if (cur >= top + fit) top = cur - fit + 1;
+    bool cursor_rows = rb_menu_screen(&menu) != RB_SCR_INFO
+                    && rb_menu_screen(&menu) != RB_SCR_KEYREF;
+    for (int i = top; i < rows && i < top + fit; i++, y += MENU_ROW_H) {
+        char label[48], value[48];
+        bool choosable = rb_menu_row(&menu, i, label, sizeof label, value, sizeof value);
+        bool sel = cursor_rows && choosable && i == cur;
+        uint16_t bg = sel ? MENU_SELECT : MENU_BG;
+        if (sel) tft.fillRoundRect(4, y, 304, MENU_ROW_H - 2, 4, MENU_SELECT);
+        int vw = value[0] ? tft.textWidth(value, 2) : 0;
+        if (vw > 150) {
+            fit_text(value, 150);
+            vw = tft.textWidth(value, 2);
+        }
+        fit_text(label, 290 - vw);
+        tft.setTextColor(choosable || !cursor_rows ? MENU_TEXT : MENU_DIM, bg);
+        if (!cursor_rows) tft.setTextColor(MENU_VALUE, bg);
+        tft.drawString(label, 12, y + 2, 2);
+        if (value[0]) {
+            tft.setTextColor(sel ? MENU_TEXT : (cursor_rows ? MENU_VALUE : MENU_TEXT), bg);
+            tft.setTextDatum(TR_DATUM);
+            tft.drawString(value, 302, y + 2, 2);
+            tft.setTextDatum(TL_DATUM);
+        }
+    }
+    if (rows > fit && fit > 0) {
+        int track = fit * MENU_ROW_H, y0 = 214 - track;
+        int th = track * fit / rows, ty = y0 + (track - th) * top / (rows - fit);
+        tft.fillRect(314, y0, 3, track, MENU_PANEL);
+        tft.fillRect(314, ty, 3, th < 6 ? 6 : th, MENU_ACCENT);
+    }
+    tft.drawFastHLine(0, 218, 320, MENU_PANEL);
+    tft.setTextColor(MENU_DIM, MENU_BG);
+    tft.drawString(rb_menu_hint(&menu), 8, 222, 2);
+}
+
+static void screen_wake(void);
+
+static void menu_toggle(rb_screen_t first) {
+    if (rb_menu_is_open(&menu)) {
+        menu.depth = 0;
+        menu_input(RB_MENU_CLOSED);
+        return;
+    }
+    // Emulation stops while the menu is open: nothing reaches CyOS, and
+    // keys down now must not stay down underneath it
+    release_all_keys();
+    volume_until = 0;
+    rb_menu_open(&menu, &g_cfg, first);
+    rb_router_set_mode(&router, rb_menu_mode(&menu));
+    if (!screen_on) screen_wake();
+    apply_config();
+    menu_dirty = true;
+    Serial.println("menu open");
+}
+
+// After a menu action: redraw, follow the router mode, or close
+static void menu_input(int result) {
+    rb_router_set_mode(&router, rb_menu_mode(&menu));
+    if (!(result & RB_MENU_CLOSED)) {
+        if (result & RB_MENU_REDRAW) menu_dirty = true;
+        return;
+    }
+    g_cfg = menu.cfg;
+    save_config();
+    release_all_keys();
+    tft.dmaWait();
+    tft.fillScreen(TFT_BLACK);
+    shown_valid = false;
+    apply_config();
+    snprintf(chrome_top, sizeof chrome_top, "ReBiko Pocket");
+    draw_chrome();
+    Serial.println("menu closed");
+}
+
+// While the menu is open the guest is paused; silence keeps the I2S
+// clock pacing the loop at 60 Hz, as hal_audio_output does
+static void menu_frame(void) {
+    if (menu_dirty) {
+        menu_dirty = false;
+        draw_menu();
+    }
+    if (i2s_initialized) {
+        memset(i2s_conv_buf, 0, 800 * sizeof(int16_t));
+        size_t written = 0;
+        i2s_write(I2S_PORT, i2s_conv_buf, 800 * sizeof(int16_t), &written, pdMS_TO_TICKS(100));
+    } else {
+        delay(16);
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     // Never wait on the USB host. HWCDC switches to a 100 ms timeout once a
@@ -1347,11 +1665,35 @@ void setup() {
     delay(500);
     Wire.setTimeOut(50);
     pinMode(PIN_KB_INT, INPUT_PULLUP);
+    load_config();
+    {
+        static const rb_output_t out = {
+            NULL, out_cybiko_key, out_type_char, out_command,
+            out_menu_nav, out_capture, out_dollar,
+        };
+        rb_menu_hooks_t hooks = {};
+        hooks.apply = hook_apply;
+        hooks.info_count = hook_info_count;
+        hooks.info_row = hook_info_row;
+        hooks.restart = hook_restart;
+        hooks.link_view = hook_link_view;
+        hooks.set_link_view = hook_set_link_view;
+        hooks.version = REBIKO_VERSION;
+        rb_menu_init(&menu, &hooks);
+        rb_router_init(&router, &g_cfg.keys, &out);
+    }
+    // Raw mode: the controller reports every key, Mic and both Shifts
+    // included, as held bits, instead of one character per press. It
+    // keeps its mode across an ESP32 reset, so it is set every boot.
+    Wire.beginTransmission(KB_I2C_ADDR);
+    Wire.write(KB_RAW_MODE_CMD);
+    kb_raw_ok = Wire.endTransmission() == 0;
+    Serial.printf("keyboard raw mode %s\n", kb_raw_ok ? "on" : "FAILED: no answer");
     kb_queue = xQueueCreate(KB_QUEUE_LEN, sizeof(uint8_t));
     if (kb_queue)
         xTaskCreatePinnedToCore(keyboard_task, "kb", 3072, NULL, 2, NULL, 1);
     else
-        Serial.println("keyboard queue failed; polling from the emu loop");
+        Serial.println("keyboard queue failed: no keyboard");
 
     // Init TFT
     tft.init();
@@ -1359,8 +1701,7 @@ void setup() {
     tft.setSwapBytes(true);  // ESP32 is little-endian, ST7789 expects big-endian
     tft.fillScreen(TFT_BLACK);
     pinMode(PIN_TFT_BL, OUTPUT);
-    light_load();
-    backlight_set(LIGHT_LEVELS[light_idx]);
+    backlight_set(LIGHT_LEVELS[g_cfg.light]);
 
     // Display buffer: internal DMA-capable SRAM if a 128 KB block is free,
     // so the per-frame upscale does not stream through the PSRAM cache that
@@ -1623,22 +1964,26 @@ void setup() {
     Serial.println("ReBiko Pocket started");
 }
 
+static void screen_wake(void) {
+    screen_on = true;
+    lcd_off_frames = 0;
+    shown_valid = false;      // redraw the whole frame
+    apply_config();
+    draw_chrome();
+}
+
 static void screen_follow_cyos(void) {
-    if (cybiko_lcd_on(emu)) {
+    if (cybiko_lcd_on(emu) || !g_cfg.screen_sleep) {
         lcd_off_frames = 0;
         if (screen_on) return;
-        setCpuFrequencyMhz(AWAKE_MHZ);
-        screen_on = true;
-        shown_valid = false;      // redraw the whole frame
-        backlight_set(LIGHT_LEVELS[light_idx]);
-        draw_chrome();
+        screen_wake();
         Serial.println("screen on");
         return;
     }
     if (!screen_on || ++lcd_off_frames < SCREEN_OFF_FRAMES) return;
     screen_on = false;
     backlight_set(0);
-    setCpuFrequencyMhz(ASLEEP_MHZ);
+    apply_cpu_clock();
     Serial.println("screen off: CyOS is asleep");
 }
 
@@ -1706,6 +2051,14 @@ void loop() {
     // first cut every synthetic hold by a frame, and Esc never lasted long
     // enough for CyOS to scan it.
     poll_input();
+
+    // The menu pauses the guest; the radio keeps running
+    if (rb_menu_is_open(&menu)) {
+        cybiko_sx1262_pump();
+        menu_frame();
+        link_tick(millis());
+        return;
+    }
 
     uint32_t t0 = micros();
     audio_wait_us = 0;

@@ -72,34 +72,56 @@ PlatformIO fetches TFT_eSPI and the other dependencies on the first build. Every
 
 The T-Deck boots straight into CyOS. On first boot, CyOS asks for a nickname.
 
-**Keyboard:** Letters, digits, Enter, Space and Backspace go straight to CyOS. The T-Deck has no Esc or function keys, so `$` starts a command. The top line shows the `$` marker while one is pending:
+**Keyboard:** The keyboard runs in raw mode, so ReBiko sees every key go down and up, Mic and both Shift keys included. Letters type as themselves. Hold **Sym** for the T-Deck's digits and symbols, as printed on the keys. Keys that type are taps, held at least 12 frames, then up for 3 before the next (10 if it is the same key again): CyOS 1.2.46 misses shorter presses. A key you keep holding stays down on the Cybiko until you let go, so games see it held.
 
-| Keys | Cybiko key |
+**Left Shift** is the Cybiko's Shift key and **Right Shift** its Fn key. Each is held on the Cybiko for as long as you hold it, and CyOS does its own Shift and Fn handling.
+
+**`$` combinations:** The T-Deck has no Esc, function keys or several Cybiko symbols, so `$` starts a combination: tap `$`, then the key. The top line shows a `$` while one is waiting. `$` `$` types a `$`.
+
+| Keys | Does |
 |---|---|
 | `$` `x` | Esc |
-| `$` `h` | Help |
 | `$` `q` … `u` | F1 … F7 |
-| `$` `s` / `i` / `d` / `g` | Select / Insert / Delete / Tab |
-| `$` `$` | A `$` |
+| `$` `a` / `s` | Select / Insert |
+| `$` Backspace | Del (Backspace alone is the Cybiko's BkSp) |
+| `$` `f` | Fn (a tap of the Cybiko's Fn key) |
+| `$` `g` / `h` | Help / Tab |
+| `$` `j` `k` `l` `z` `c` `v` `b` `n` | `[` `]` `\` `` ` `` `=` `'` `;` `/` |
 | `$` `p` / `m` | Volume up / down |
-| `$` `l` | Link view on / off (range test, below) |
-| `$` `b` | Backlight: steps 4/4, 3/4, 2/4, 1/4 and round again |
+| `$` Space | Key reference: every combination, as set now |
+| `$` Mic | The ReBiko menu |
 
-Volume has 11 levels, 0 (off) to 10 (100%). After `$p` or `$m`, more `p` and `m` presses keep stepping it for 2 seconds after each press: `$ m m m` is three levels down. Any other key ends volume mode and is typed normally. The level is kept in the ESP32's NVS.
+Every key except `$`, Sym and `$` Mic can be remapped in the menu (below), so this is the default table.
 
-The backlight starts at 3/4. Its level is kept in NVS too.
+Backspace erases before the cursor (the Cybiko's BkSp). Before raw mode it sent the Cybiko's Del, which deletes forward and did nothing at the end of a line.
 
-**Screen sleep:** After 5 idle minutes CyOS turns its LCD off. The T-Deck then turns off the backlight, stops drawing, and drops the CPU from 240 to 160 MHz. Any key wakes CyOS, and the screen comes back with it at 240. The radio keeps running while it sleeps. The awake desktop stays at 240: at 160 its redraw bursts use nearly every frame's time, and the sound would break up.
+Volume has 11 levels, 0 to 10 (100%). After `$p` or `$m`, more `p` and `m` presses keep stepping it for 2 seconds after each press: `$ m m m` is three levels down. Any other key ends volume mode and is typed normally.
 
-Each typed key is held for 12 frames, then released for 3 before the next one, or for 10 if it is the same key again. CyOS 1.2.46 misses shorter presses.
+**Trackball:** The Cybiko's d-pad. A click is Enter. Holding the click for 600 ms is Esc, held until you let go.
 
-**Trackball:** The Cybiko's d-pad. A click is Enter. Holding the click for 600 ms is Esc.
+**Menu (`$` Mic):** The emulator pauses while the menu is open, and nothing you press reaches CyOS. Closing it carries on where CyOS was. Move with the ball, click (or Enter) to choose, hold the ball (or Backspace) to go back; on a value, left and right change it. `$` Mic closes it from anywhere.
+
+| Section | Settings |
+|---|---|
+| Controls & Key Mapping | Every Cybiko key and command the T-Deck reaches by a combination or special key: see its inputs, change it, add another input, clear your own, or restore its default. Restore all key mappings. |
+| Performance & CPU | CPU mode: Dynamic (240 MHz, 160 MHz while CyOS sleeps), Always high (240 MHz), or Always low (160 MHz) |
+| Display | Brightness 4/4 to 1/4 · Scale 2x or 1x (the Cybiko's own 160×100) · Screen off when CyOS sleeps |
+| Audio | Sound on/off · Volume 0–10 (the same level as `$p` / `$m`) |
+| System | Version · Hardware info · Key reference · Radio link view · Restore all defaults · Restart ReBiko · Return to emulation |
+
+To change a mapping, choose the key, then Change mapping, and press the new key, `$` combination, or ball move or click. If that input already does something, the menu says what and asks before replacing it. Holding the ball cancels. `$` Mic can't be taken, so the menu is always reachable.
+
+Always low runs at 160 MHz all the time to save battery. The idle desktop and Chat mostly keep up, but busy screens and games fall behind real time now and then: they slow down and the sound breaks up while they do. Dynamic is the default.
+
+**Settings** are kept in the ESP32's NVS as one blob with a version and a CRC (`cybiko-emu/rebiko_config.h`), written when the menu closes, when volume mode ends, and only if something changed. Damaged settings are replaced by defaults; out-of-range values are reset one by one. Restore all defaults resets keys, CPU, display and audio. It leaves CyOS's files and the SD card alone.
+
+**Screen sleep:** After 5 idle minutes CyOS turns its LCD off. The T-Deck then turns off the backlight and stops drawing, and in the Dynamic CPU mode drops the CPU from 240 to 160 MHz. Any key wakes CyOS, and the screen comes back with it (at 240 MHz, unless the mode is Always low). The radio keeps running while it sleeps. The awake desktop stays at 240: at 160 its redraw bursts use nearly every frame's time, and the sound would break up.
 
 **Saves:** The Classic writes CyOS's flash chip to `/cybiko-v1/save.flash` 10 s after CyOS's last write to it. That covers your nickname, settings and files. The Xtreme saves RAM to `/cybiko/save.nvram` every 5 minutes, when it has changed. Both are written to `save.tmp` first and then renamed. SD SPI runs at 20 MHz.
 
 **Radio:** The SX1262 sits under the emulated radio co-processor. It runs at 915 MHz, SF7, 500 kHz, 22 dBm, with listen-before-talk. CyOS's own radio code runs unchanged. Chat rooms are radio channels, and the co-processor hears only the channel CyOS tuned. CyOS transmits nothing until wireless is on in its settings. On the PC side, ReBiko Desktop (`tools/v1_emu.c`) uses a Heltec running ReBiko Radio (`../cybiko-heltec-modem/`).
 
-**Range test:** `$l` swaps the bottom hint line for a link readout, and the T-Deck sends a ping every second:
+**Range test:** Radio link view (menu > System) swaps the bottom hint line for a link readout, and the T-Deck sends a ping every second:
 
     rx 120 lost 2 1.6%  -96dBm snr 4  1s
 
@@ -114,8 +136,15 @@ cybiko-lilygo/
   cybiko-emu/
     main.cpp          # T-Deck firmware (display, keyboard, audio, SD, radio pump)
     radio_sx1262.*    # SX1262 transport wrapper
+    rebiko_input.*    # Physical keys, $ combinations, bindings, input router
+    rebiko_config.*   # Settings struct and its versioned NVS blob
+    rebiko_menu.*     # The $ Mic menu: screens, cursor, key remapping
+    tdeck_keymap.*    # Cybiko keyboard matrix positions (Classic and Xtreme)
     tdeck_pins.h      # Hardware pin definitions (original T-Deck)
+  tests/
+    run_rebiko.sh     # Host tests of the rebiko_* modules (gcc, sanitizers)
   tools/
+    keytest/          # Keyboard and trackball test (env keytest-raw: raw bits)
     v1_emu.c / .sh    # ReBiko Desktop, the PC Classic (SDL)
     v1_chat.sh        # Two Classics on the host walk into Chat and swap lines
     v1_boot.sh        # V1 host STATUS line vs Java

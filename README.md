@@ -7,8 +7,8 @@
 <p align="center"><em>Original CyOS. New hardware. Back on the air.</em></p>
 
 <p align="center">
-  <strong>v1.1026.3b (beta)</strong> · October 2026 ·
-  <a href="https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.3b">Linux &amp; Windows builds</a>
+  <strong>v1.1026.4b (beta)</strong> · October 2026 ·
+  <a href="https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.4b">Linux &amp; Windows builds</a>
 </p>
 
 <p align="center">
@@ -35,12 +35,12 @@ Three pieces:
 
 ## Get it
 
-**[v1.1026.3b release](https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.3b)** — ReBiko Desktop, CyOS included, no compiler.
+**[v1.1026.4b release](https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.4b)** — ReBiko Desktop, CyOS included, no compiler.
 
 | File | What |
 | --- | --- |
-| `rebiko-desktop-v1.1026.3b-linux-x64.zip` | Linux (`libsdl2`, `libpng`, X11) |
-| `rebiko-desktop-v1.1026.3b-windows-x64.zip` | Windows (SDL2 bundled) |
+| `rebiko-desktop-v1.1026.4b-linux-x64.zip` | Linux (`libsdl2`, `libpng`, X11) |
+| `rebiko-desktop-v1.1026.4b-windows-x64.zip` | Windows (SDL2 bundled) |
 
 Unzip. `./run.sh` or `run.bat`. Classic boot ROM and CyOS 1.2.46 are already in `roms/`.
 
@@ -196,7 +196,7 @@ The guest is unmodified CyOS. This is not a Cybiko-style rewrite. Design notes l
 
 ## Status
 
-Honest snapshot, 24 Oct 2026.
+Honest snapshot, 26 Oct 2026.
 
 | Have today | Still cooking |
 | --- | --- |
@@ -204,7 +204,8 @@ Honest snapshot, 24 Oct 2026.
 | Heltec auto-detect + ReBiko Radio OLED | CyOS app loader from the PC |
 | ReBiko Pocket (T-Deck Classic firmware) | XT battery on Port A |
 | PC ↔ T-Deck Chat over LoRa, rooms kept apart | Native Windows click-through window shape |
-| T-Deck volume 0–10, settings saved 10 s after a change | Longest range with no lost messages (22 dBm, `$l` link view) |
+| T-Deck volume 0–10, settings saved 10 s after a change | Longest range with no lost messages (22 dBm, link view) |
+| ReBiko Pocket menu (`$` Mic): key remapping, CPU mode, display, audio | |
 | | Private messages, the people list and multiplayer games over the air |
 
 Chat over the air works now. The bench test is the PC on a Heltec and a T-Deck in Chat MAIN, 3 lines each way, and it passes 6/6. v1.1026.3b is the first download with it; Chat in v1.1026.2b and earlier doesn't work.

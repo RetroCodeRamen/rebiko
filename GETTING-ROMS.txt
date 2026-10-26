@@ -1,6 +1,6 @@
 Classic (V1) dumps ship in the PC download:
 
-  https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.2b
+  https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.4b
 
   roms/boot.bin    32 KB boot ROM (cyrom112.bin)
   roms/flash.bin   CyOS 1.2.46 (flash_v1246.bin)
