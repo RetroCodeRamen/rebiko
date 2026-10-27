@@ -7,10 +7,11 @@ typedef struct {
     bool needs_fn;
     int fn_col;
     uint16_t fn_mask;
+    bool shift;         /* Shift and this key */
 } tdeck_ascii_key_t;
 
 #ifdef CYBIKO_MACHINE_V1
-/* Classic: every character here is one key, no Fn. Backspace is the
+/* Classic: every character here is one key, or Shift and one key; no Fn. Backspace is the
  * BkSp key (A.6 bit 2), which erases before the cursor; Del (A.0 bit 2)
  * deletes forward and does nothing at the end of a line. The Java
  * emulator sent Backspace to Del. */
@@ -45,8 +46,18 @@ static const tdeck_ascii_key_t ASCII_MAP[] = {
     { '9', 8, 0x04, false, 0, 0 }, { 'p', 8, 0x08, false, 0, 0 },
     { 'o', 8, 0x10, false, 0, 0 }, { 'l', 8, 0x20, false, 0, 0 },
     { ',', 8, 0x40, false, 0, 0 },
-    /* T-Deck $ then $ → CyOS Shift+4 */
-    { '$', 3, 0x08, false, 0, 0 },
+    /* Shift layer, as on a US PC keyboard (T-Deck $ then $ is Shift+4) */
+    { '!', 3, 0x02, false, 0, 0, true }, { '@', 1, 0x08, false, 0, 0, true },
+    { '#', 2, 0x08, false, 0, 0, true }, { '$', 3, 0x08, false, 0, 0, true },
+    { '%', 4, 0x08, false, 0, 0, true }, { '^', 5, 0x08, false, 0, 0, true },
+    { '&', 6, 0x08, false, 0, 0, true }, { '*', 7, 0x08, false, 0, 0, true },
+    { '(', 8, 0x04, false, 0, 0, true }, { ')', 7, 0x04, false, 0, 0, true },
+    { '_', 7, 0x01, false, 0, 0, true }, { '+', 8, 0x02, false, 0, 0, true },
+    { ':', 5, 0x02, false, 0, 0, true }, { '"', 8, 0x01, false, 0, 0, true },
+    { '?', 6, 0x02, false, 0, 0, true }, { '<', 8, 0x40, false, 0, 0, true },
+    { '>', 7, 0x02, false, 0, 0, true }, { '{', 3, 0x80, false, 0, 0, true },
+    { '}', 4, 0x80, false, 0, 0, true }, { '|', 5, 0x80, false, 0, 0, true },
+    /* no ~: CyOS types Shift+` as ` (checked on the T-Deck, 27 Oct 2026) */
 };
 #else
 static const tdeck_ascii_key_t ASCII_MAP[] = {
@@ -135,7 +146,7 @@ bool tdeck_map_ascii(char c, tdeck_key_event_t *ev) {
     }
     if (!ev) return true;
     ev->found = true;
-    ev->needs_shift = (upper && !k->needs_fn) || (k->ascii == '$' && !k->needs_fn);
+    ev->needs_shift = (upper && !k->needs_fn) || k->shift;
 #ifndef CYBIKO_MACHINE_V1
     if (k->ascii == '\\') ev->needs_shift = true;   /* Xtreme: Shift+. */
 #endif

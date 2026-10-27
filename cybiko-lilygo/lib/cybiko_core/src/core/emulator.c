@@ -611,6 +611,23 @@ void cybiko_debug_run(cybiko_emu_t *emu, uint32_t pc, int n) {
     h8s_cpu_run(&emu->cpu, n);
 }
 
+int cybiko_take_spi_flash_dirty(cybiko_emu_t *emu, uint8_t *bits, size_t n) {
+#if CYBIKO_HAS_SPI_FLASH
+    uint8_t *d = emu->bus.spi_flash.dirty;
+    if (n > sizeof emu->bus.spi_flash.dirty) n = sizeof emu->bus.spi_flash.dirty;
+    int count = 0;
+    for (size_t i = 0; i < n; i++) {
+        bits[i] = d[i];
+        count += __builtin_popcount(d[i]);
+        d[i] = 0;
+    }
+    return count;
+#else
+    (void)emu; (void)bits; (void)n;
+    return 0;
+#endif
+}
+
 const uint8_t *cybiko_get_spi_flash(const cybiko_emu_t *emu, size_t *len, uint32_t *writes) {
 #if CYBIKO_HAS_SPI_FLASH
     if (len) *len = AT45_SIZE;

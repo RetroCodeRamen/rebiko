@@ -51,10 +51,12 @@ static int lora_send(cybiko_radio_transport_t *self,
         return -1;
     }
     {
+        /* a CyOS frame: 8-byte address header, channel byte, type */
+        size_t skip = channel != CYBIKO_LORA_PING_CHANNEL && len > 9 ? 8 : 0;
         char snip[24];
-        radio_snip(snip, sizeof snip, data, len);
+        radio_snip(snip, sizeof snip, data + skip, len - skip);
         cybiko_radio_log("tx type=%02X len=%zu %s\n",
-                         len > 1 ? data[1] : 0, len, snip);
+                         len > skip + 1 ? data[skip + 1] : 0, len, snip);
     }
     uint8_t pkts[CYBIKO_LINK_MAX_FRAGS][CYBIKO_LINK_MAX_PHYS];
     uint16_t lens[CYBIKO_LINK_MAX_FRAGS];

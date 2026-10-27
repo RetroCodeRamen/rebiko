@@ -40,6 +40,7 @@ typedef struct {
     /* Program: write position in buffer1, -1 = not programming */
     int      prog_pos;
     uint32_t writes;                  /* pages committed since load, for save */
+    uint8_t  dirty[AT45_PAGES / 8];   /* pages committed since the last take */
 } at45db041_t;
 
 void    at45_init(at45db041_t *f, uint8_t *data);

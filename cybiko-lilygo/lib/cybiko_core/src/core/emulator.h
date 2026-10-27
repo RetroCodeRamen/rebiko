@@ -87,6 +87,10 @@ void cybiko_debug_run(cybiko_emu_t *emu, uint32_t pc, int n);
  * is what a V1 save holds. writes counts pages programmed since load.
  * NULL on the Xtreme. */
 const uint8_t *cybiko_get_spi_flash(const cybiko_emu_t *emu, size_t *len, uint32_t *writes);
+/* The Classic's flash pages CyOS has programmed since the last call, one
+ * bit a page (bit p&7 of byte p>>3), copied to bits and cleared. Returns
+ * how many; 0 on the Xtreme. A save can rewrite just these pages. */
+int cybiko_take_spi_flash_dirty(cybiko_emu_t *emu, uint8_t *bits, size_t n);
 
 /* Cybiko Classic ADC result, 10-bit, channels 0-3. Channels 1 and 2 feed
  * CyOS's battery gauge. No effect on the Xtreme. */

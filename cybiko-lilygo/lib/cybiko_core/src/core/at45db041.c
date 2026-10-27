@@ -39,6 +39,7 @@ void at45_cs(at45db041_t *f, bool selected) {
             if (page < AT45_PAGES) {
                 memcpy(f->data + page * AT45_PAGE_SIZE, f->buffer1, AT45_PAGE_SIZE);
                 f->writes++;
+                f->dirty[page >> 3] |= (uint8_t)(1u << (page & 7));
             }
         }
         f->cmd_size = 0;

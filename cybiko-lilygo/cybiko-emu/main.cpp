@@ -19,6 +19,9 @@
 extern "C" {
 #include "core/emulator.h"
 #include "core/cfs.h"
+#ifdef CYBIKO_MACHINE_V1
+#include "core/at45db041.h"
+#endif
 #include "radio_link.h"
 #include "radio_coproc.h"
 }
@@ -68,7 +71,6 @@ extern "C" void cybiko_radio_log(const char *fmt, ...) {
 
 static TFT_eSPI tft;
 static uint16_t *disp_buf;  // 320x200 RGB565 in PSRAM
-static uint32_t blit_count = 0;
 static unsigned long emu_started_ms = 0;
 
 static rb_config_t g_cfg;   // settings (rebiko_config.h), saved in NVS
@@ -160,7 +162,9 @@ static void init_gray_lut(void) {
         // Proper grayscale: keep R=B in lock-step, G = R*2 for balanced gray
         uint16_t v5 = (i >> 3) & 0x1F;   // 5-bit for R and B
         uint16_t v6 = v5 << 1;            // 6-bit for G (exact 2x ratio)
-        gray_lut[i] = (v5 << 11) | (v6 << 5) | v5;
+        uint16_t c = (v5 << 11) | (v6 << 5) | v5;
+        gray_lut[i] = (uint16_t)(c << 8 | c >> 8);   // byte-swapped for the panel
+
     }
 }
 
@@ -176,11 +180,7 @@ static void hal_render_frame(void *ctx, const uint8_t *pixels, int w, int h) {
     render_us += micros() - t0;
 }
 
-// The SX1262 shares SPI with the panel. Radio transfers wait until the
-// previous frame's DMA has finished; the driver retries on a later poll.
-static bool tdeck_bus_free(void) {
-    return !tft.dmaBusy();
-}
+static bool tdeck_bus_free(void);
 
 // Last frame sent to the panel. The idle Classic desktop changes on about
 // 1 frame in 30, and then about 8 of its 100 rows, while CyOS rewrites
@@ -191,18 +191,123 @@ static uint8_t shown_frame[160 * 100];
 static bool shown_valid = false;
 static uint32_t shown_serial;
 
+/* endWrite raises the panel's chip select, which TFT_eSPI drives by hand.
+ * Raising it before the DMA had finished dropped the end of a large update
+ * (white bars on the boot logo, half a Chat screen); waiting for the DMA
+ * right after starting it cost the overlap with emulation. So the panel
+ * stays selected after a push, and panel_finish() waits and releases it
+ * before anything else touches the bus: the next push, the radio
+ * (tdeck_bus_free), the SD card, other drawing. */
+static bool panel_open;
+
+static void panel_finish(void) {
+    tft.dmaWait();
+    if (panel_open) {
+        tft.endWrite();
+        panel_open = false;
+    }
+}
+
+// The SX1262 shares SPI with the panel; the driver retries on a later poll
+static bool tdeck_bus_free(void) {
+    if (tft.dmaBusy())
+        return false;
+    panel_finish();
+    return true;
+}
+
+/* Columns x0..x1 of rows y0..y1 of a w x h Cybiko picture to the panel,
+ * by DMA, packed at the start of disp_buf. Updates send whole rows: sending
+ * only the changed columns drew the boot logo wrong on the panel (27 Oct
+ * 2026, cause not found; the same updates were right in a host check).
+ * gray_lut is already byte-swapped: TFT_eSPI's swap is a whole extra pass
+ * over the pixels, so it is off for this push. */
+static void push_rect(const uint8_t *pixels, int w, int h, int y0, int y1, int x0, int x1) {
+    int rows = y1 - y0 + 1, cols = x1 - x0 + 1;
+    panel_finish();
+    uint16_t *buf = disp_buf;
+    if (g_cfg.scale == RB_SCALE_1X) {
+        // 1x, the Cybiko's own 160x100, centred in the 2x area
+        for (int y = 0; y < rows; y++) {
+            const uint8_t *src = pixels + (y0 + y) * w + x0;
+            for (int x = 0; x < cols; x++)
+                buf[y * cols + x] = gray_lut[src[x]];
+        }
+        tft.startWrite();
+        tft.setSwapBytes(false);
+        tft.pushImageDMA((SCALED_W - w) / 2 + x0, BORDER_TOP + (SCALED_H - h) / 2 + y0,
+                         cols, rows, buf);
+        tft.setSwapBytes(true);
+        panel_open = true;
+        return;
+    }
+    // 2x nearest-neighbour: each pixel twice across (one 32-bit store),
+    // and each line twice down (a copy)
+    int stride = cols * 2;
+    for (int y = 0; y < rows; y++) {
+        const uint8_t *src = pixels + (y0 + y) * w + x0;
+        uint32_t *row0 = (uint32_t *)(buf + y * 2 * stride);
+        for (int x = 0; x < cols; x++) {
+            uint32_t c = gray_lut[src[x]];
+            row0[x] = c | c << 16;
+        }
+        memcpy(buf + (y * 2 + 1) * stride, row0, (size_t)stride * 2);
+    }
+    tft.startWrite();
+    tft.setSwapBytes(false);
+    tft.pushImageDMA(x0 * 2, BORDER_TOP + y0 * 2, stride, rows * 2, buf);
+    tft.setSwapBytes(true);
+    panel_open = true;
+}
+
+static void push_rows(const uint8_t *pixels, int w, int h, int y0, int y1) {
+    push_rect(pixels, w, h, y0, y1, 0, w - 1);
+}
+
+/* Refresh, as e-ink does: every REFRESH_EVERY frames REFRESH_ROWS rows of
+ * what the panel should show are sent again, so a lost update heals in
+ * 100 / 2 * 4 frames, about 3.3 s, for ~0.3 ms each time. Large updates
+ * are the ones that get lost, and a heal you can watch sweep down is a
+ * ripple, so after an update of REPUSH_ROWS rows or more the whole screen
+ * is sent again once nothing has changed for REPUSH_MS: during animation
+ * (Cylandia) a resend after every large update cost ~8% of the time. */
+#define BOOT_DRAW_MS  40
+#define REFRESH_EVERY 4
+#define REFRESH_ROWS  2
+#define REPUSH_ROWS   50
+#define REPUSH_MS     100
+static uint32_t repush_at;   // millis() for a whole resend, 0 = none
+
 static void render_frame_body(const uint8_t *pixels, int w, int h) {
     /* If the last DMA is still running, skip this frame; shown_frame is
      * not updated, so the change is drawn next time. */
     if (!emu_screen_shown() || tft.dmaBusy())
         return;
-    if (boot_unpacking() && (++blit_count % 20) != 1)
-        return;
+    /* While CyOS loads, draw at most every BOOT_DRAW_MS, so loading runs
+     * near full speed but still looks like motion (every 20th frame was
+     * a few pictures a second) */
+    static uint32_t boot_drawn_at;
+    if (boot_unpacking()) {
+        if (millis() - boot_drawn_at < BOOT_DRAW_MS)
+            return;
+        boot_drawn_at = millis();
+    }
+    if (w * h > (int)sizeof shown_frame)
+        h = (int)sizeof shown_frame / w;
+    static uint32_t refresh_tick;
+    static int refresh_row;
+    if (repush_at && (int32_t)(millis() - repush_at) >= 0) {
+        repush_at = 0;
+        push_rows(shown_frame, w, h, 0, h - 1);
+    } else if (shown_valid && ++refresh_tick % REFRESH_EVERY == 0) {
+        if (refresh_row >= h) refresh_row = 0;
+        int last = refresh_row + REFRESH_ROWS - 1 < h ? refresh_row + REFRESH_ROWS - 1 : h - 1;
+        push_rows(shown_frame, w, h, refresh_row, last);
+        refresh_row = last + 1;
+    }
     uint32_t serial = cybiko_lcd_serial(emu);
     if (shown_valid && serial == shown_serial)
         return;
-    if (w * h > (int)sizeof shown_frame)
-        h = (int)sizeof shown_frame / w;
     int y0 = 0, y1 = h - 1;
     if (shown_valid) {
         while (y0 < h && memcmp(shown_frame + y0 * w, pixels + y0 * w, w) == 0) y0++;
@@ -215,42 +320,10 @@ static void render_frame_body(const uint8_t *pixels, int w, int h) {
     memcpy(shown_frame + y0 * w, pixels + y0 * w, (size_t)(y1 - y0 + 1) * w);
     shown_valid = true;
     shown_serial = serial;
-    int rows = y1 - y0 + 1;
-
-    if (g_cfg.scale == RB_SCALE_1X) {
-        // 1x, the Cybiko's own 160x100, centred in the 2x area
-        uint16_t *dst = disp_buf + y0 * w;
-        const uint8_t *src = pixels + y0 * w;
-        for (int i = 0; i < rows * w; i++)
-            dst[i] = gray_lut[src[i]];
-        tft.startWrite();
-        tft.pushImageDMA((SCALED_W - w) / 2, BORDER_TOP + (SCALED_H - h) / 2 + y0, w, rows, dst);
-        tft.dmaWait();
-        tft.endWrite();
-        return;
-    }
-
-    // 2x nearest-neighbor upscale of the changed rows: 160 -> 320 wide
-    for (int y = y0; y <= y1; y++) {
-        const uint8_t *src_row = pixels + y * w;
-        uint16_t *dst_row0 = disp_buf + (y * 2) * SCALED_W;
-        uint16_t *dst_row1 = dst_row0 + SCALED_W;
-        for (int x = 0; x < w; x++) {
-            uint16_t c = gray_lut[src_row[x]];
-            dst_row0[x * 2]     = c;
-            dst_row0[x * 2 + 1] = c;
-            dst_row1[x * 2]     = c;
-            dst_row1[x * 2 + 1] = c;
-        }
-    }
-    /* endWrite raises the panel's chip select, which TFT_eSPI drives by
-     * hand; doing that before the DMA has finished dropped the end of a
-     * large update, and since shown_frame already holds those rows they
-     * stayed stale (white bars on the boot logo, half a Chat screen). */
-    tft.startWrite();
-    tft.pushImageDMA(0, BORDER_TOP + y0 * 2, SCALED_W, rows * 2, disp_buf + y0 * 2 * SCALED_W);
-    tft.dmaWait();
-    tft.endWrite();
+    push_rows(pixels, w, h, y0, y1);
+    // any change moves a pending resend on; a large one asks for one
+    if (repush_at || y1 - y0 + 1 >= REPUSH_ROWS)
+        repush_at = (millis() + REPUSH_MS) | 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,8 +446,8 @@ static void press_tap(const tap_t *t) {
         pending_fn.delay_frames = 8;
         fn_pending = true;
     } else {
-        if (ev->needs_shift)
-            press_key_ex(TDECK_SHIFT_COL, TDECK_SHIFT_MASK, -1, true);
+        if (ev->needs_shift)   // held as long as the key, as Fn above
+            press_key_ex(TDECK_SHIFT_COL, TDECK_SHIFT_MASK, t->phys, true);
         press_key_ex(ev->col, ev->mask, t->phys, true);
     }
     last_tap = *ev;
@@ -410,7 +483,9 @@ static void keyboard_tick_frame(void) {
         pending_fn.delay_frames--;
         if (pending_fn.delay_frames <= 0) {
             press_key_ex(pending_fn.letter_col, pending_fn.letter_mask, pending_fn.phys, true);
-            press_key_ex(TDECK_FN_COL, TDECK_FN_MASK, -1, true);   // Fn stays down as long
+            // Fn stays down as long as the letter: held past its 12 frames,
+            // a letter without Fn repeated as the plain letter
+            press_key_ex(TDECK_FN_COL, TDECK_FN_MASK, pending_fn.phys, true);
             fn_pending = false;
         }
     }
@@ -538,7 +613,7 @@ static void link_tick(uint32_t now) {
     }
     if (!emu_screen_shown())
         return;
-    tft.dmaWait();
+    panel_finish();
     tft.fillRect(0, BORDER_BOTTOM, SCALED_W, 240 - BORDER_BOTTOM, TFT_BLACK);
     draw_link_line();
 }
@@ -546,7 +621,7 @@ static void link_tick(uint32_t now) {
 static void draw_chrome(void) {
     if (!emu_screen_shown())
         return;
-    tft.dmaWait();
+    panel_finish();
     tft.fillRect(0, 0, SCALED_W, BORDER_TOP, TFT_BLACK);
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     if (chrome_top[0])
@@ -694,15 +769,25 @@ static void keyboard_poll_raw(void) {
         return;
     for (int i = 0; i < 5; i++)
         cur[i] = (uint8_t)Wire.read();
-    for (int col = 0; col < 5; col++) {
-        uint8_t diff = (cur[col] ^ last[col]) & 0x7F;
-        for (int row = 0; diff && row < 7; row++) {
-            if (!(diff & (1u << row))) continue;
-            uint8_t ev = (uint8_t)(RB_PK(col, row) | ((cur[col] >> row & 1) ? 0x80 : 0));
-            xQueueSend(kb_queue, &ev, 0);
+    /* One scan can hold a modifier and a key pressed together. Sym and
+     * Shift going down go first and coming up go last, whatever their
+     * column: Sym is in column 0 row 2, after Q and W, so Sym+W typed w. */
+    for (int pass = 0; pass < 3; pass++) {
+        for (int col = 0; col < 5; col++) {
+            uint8_t diff = (cur[col] ^ last[col]) & 0x7F;
+            for (int row = 0; diff && row < 7; row++) {
+                if (!(diff & (1u << row))) continue;
+                int phys = RB_PK(col, row);
+                bool down = cur[col] >> row & 1;
+                bool mod = phys == RB_PK_SYM || phys == RB_PK_ALT ||
+                           phys == RB_PK_LSHIFT || phys == RB_PK_RSHIFT;
+                if (pass != (mod ? (down ? 0 : 2) : 1)) continue;
+                uint8_t ev = (uint8_t)(phys | (down ? 0x80 : 0));
+                xQueueSend(kb_queue, &ev, 0);
+            }
         }
-        last[col] = cur[col];
     }
+    memcpy(last, cur, sizeof last);
 }
 
 /* The controller scans its matrix about every 35 ms; polling every 5 ms
@@ -1203,7 +1288,114 @@ static uint8_t *inject_sd_apps(uint8_t *nvram, size_t *nvram_size) {
 }
 #endif
 
-static void save_nvram(cybiko_emu_t *emu) {
+/* Saves run in the background. The image is copied (a few ms), then
+ * written to save.tmp SAVE_CHUNK bytes a frame, and save.tmp replaces the
+ * save once every byte is on the card, so a cut-off write keeps the old
+ * one. Written in one go, the Classic's 1 MB stopped everything for 1.9 s
+ * ten seconds after each CyOS save. */
+#define SAVE_CHUNK 2048
+static uint8_t *save_copy;
+static size_t save_cap, save_len, save_off;
+static File save_file;
+static bool saving;
+static uint32_t save_t0, save_slowest_us;
+#ifdef CYBIKO_MACHINE_V1
+/* The Classic: once the card holds the whole image, a save rewrites only
+ * the pages CyOS programmed, in place, SAVE_PAGES a frame. A note or a
+ * setting is a few dozen of the 4096 pages. */
+#define SAVE_PAGES 8
+static bool save_card_whole;          // the card's save is the full image
+static bool save_by_page;             // the save in progress goes page by page
+static uint8_t save_dirty[AT45_PAGES / 8];
+static int save_page, save_pages;
+#endif
+
+static void save_abandon(const char *why) {
+    if (why)
+        Serial.println(why);
+    save_file.close();
+    SD.remove(SD_PATH("save.tmp"));
+    saving = false;
+    last_nvram_hash = 0;   // try again next interval
+}
+
+// One chunk of a save in progress
+static void save_step(void) {
+    if (!saving)
+        return;
+    panel_finish();   // the card shares SPI with the panel
+#ifdef CYBIKO_MACHINE_V1
+    if (save_by_page) {
+        size_t len;
+        const uint8_t *img = cybiko_get_spi_flash(emu, &len, NULL);
+        static uint8_t page[AT45_PAGE_SIZE];
+        for (int done = 0; done < SAVE_PAGES && save_page < AT45_PAGES; save_page++) {
+            if (!(save_dirty[save_page >> 3] & (1u << (save_page & 7))))
+                continue;
+            memcpy(page, img + (size_t)save_page * AT45_PAGE_SIZE, AT45_PAGE_SIZE);
+            if (!save_file.seek((uint32_t)save_page * AT45_PAGE_SIZE) ||
+                save_file.write(page, AT45_PAGE_SIZE) != AT45_PAGE_SIZE) {
+                save_card_whole = false;   // the next save writes it all
+                save_abandon("NVRAM save failed: page write; the next save is whole");
+                return;
+            }
+            done++;
+        }
+        if (save_page < AT45_PAGES)
+            return;
+        save_file.close();
+        saving = false;
+        Serial.printf("NVRAM saved (%d pages, %lu ms in the background)\n",
+                      save_pages, (unsigned long)(millis() - save_t0));
+        return;
+    }
+#endif
+    // through an internal buffer, so a short write shows where it stopped
+    static uint8_t chunk[SAVE_CHUNK];
+    size_t n = save_len - save_off < SAVE_CHUNK ? save_len - save_off : SAVE_CHUNK;
+    memcpy(chunk, save_copy + save_off, n);
+    uint32_t c0 = micros();
+    size_t w = save_file.write(chunk, n);
+    if (micros() - c0 > save_slowest_us) save_slowest_us = micros() - c0;
+    save_off += w;
+    if (w != n) {
+        Serial.printf("NVRAM save failed: %u of %u bytes, old save kept\n",
+                      (unsigned)save_off, (unsigned)save_len);
+        save_abandon(NULL);
+        return;
+    }
+    if (save_off < save_len)
+        return;
+    uint32_t e0 = millis();
+    save_file.close();
+    uint32_t e1 = millis();
+    saving = false;
+    SD.remove(SD_PATH(SAVE_NAME));
+    uint32_t e2 = millis();
+    bool renamed = SD.rename(SD_PATH("save.tmp"), SD_PATH(SAVE_NAME));
+    Serial.printf("save timing: slowest chunk %lu us, close %lu ms, remove %lu ms, rename %lu ms\n",
+                  (unsigned long)save_slowest_us, (unsigned long)(e1 - e0),
+                  (unsigned long)(e2 - e1), (unsigned long)(millis() - e2));
+    save_slowest_us = 0;
+    if (!renamed) {
+        Serial.println("NVRAM save failed: rename, data is in save.tmp");
+        last_nvram_hash = 0;
+        return;
+    }
+    Serial.printf("NVRAM saved (%u bytes, %lu ms in the background)\n",
+                  (unsigned)save_len, (unsigned long)(millis() - save_t0));
+#ifdef CYBIKO_MACHINE_V1
+    save_card_whole = save_len == AT45_SIZE;
+#endif
+}
+
+// Start a save if anything changed since the last one. wait: finish it,
+// and one in progress, before returning (restart, machine switch).
+static void save_nvram(cybiko_emu_t *emu, bool wait) {
+    while (wait && saving)
+        save_step();
+    if (saving)
+        return;
     size_t len = 0;
 #ifdef CYBIKO_MACHINE_V1
     // Skip unless CyOS programmed a flash page since the last save. A
@@ -1213,6 +1405,23 @@ static void save_nvram(cybiko_emu_t *emu) {
     if (!data || len == 0) return;
     if (writes == last_nvram_hash) return;
     last_nvram_hash = writes;
+    save_pages = cybiko_take_spi_flash_dirty(emu, save_dirty, sizeof save_dirty);
+    if (save_card_whole) {
+        save_t0 = millis();
+        panel_finish();
+        save_file = SD.open(SD_PATH(SAVE_NAME), "r+");
+        if (save_file && save_file.size() == len) {
+            save_by_page = true;
+            save_page = 0;
+            saving = true;
+            while (wait && saving)
+                save_step();
+            return;
+        }
+        if (save_file) save_file.close();
+        save_card_whole = false;   // not what we wrote: write it whole
+    }
+    save_by_page = false;
 #else
     const uint8_t *data = cybiko_get_nvram(emu, &len);
     if (!data || len == 0) return;
@@ -1222,47 +1431,30 @@ static void save_nvram(cybiko_emu_t *emu) {
     if (hash == last_nvram_hash) return;
     last_nvram_hash = hash;
 #endif
-
-    // The card shares SPI with the panel: never start while a frame's DMA
-    // is still running. Write a temp file and only replace the save once
-    // every byte is on the card. Opening save.nvram for writing truncates
-    // it, and an interrupted 2 MB write used to leave a short or empty file.
-    tft.dmaWait();
-    uint32_t t0 = millis();
-    File f = SD.open(SD_PATH("save.tmp"), FILE_WRITE);
-    if (!f) {
+    if (len > save_cap) {
+        free(save_copy);
+        save_copy = (uint8_t *)ps_malloc(len);
+        save_cap = save_copy ? len : 0;
+        if (!save_copy) {
+            Serial.println("NVRAM save failed: no room to copy the image");
+            last_nvram_hash = 0;
+            return;
+        }
+    }
+    memcpy(save_copy, data, len);
+    save_len = len;
+    save_off = 0;
+    panel_finish();
+    save_t0 = millis();
+    save_file = SD.open(SD_PATH("save.tmp"), FILE_WRITE);
+    if (!save_file) {
         Serial.println("NVRAM save failed: cannot open save.tmp");
         last_nvram_hash = 0;
         return;
     }
-    // 4 KB at a time through an internal buffer, so a short write shows
-    // where it stopped.
-    static uint8_t chunk[4096];
-    size_t wrote = 0;
-    while (wrote < len) {
-        size_t n = len - wrote < sizeof chunk ? len - wrote : sizeof chunk;
-        memcpy(chunk, data + wrote, n);
-        size_t w = f.write(chunk, n);
-        wrote += w;
-        if (w != n)
-            break;
-    }
-    f.close();
-    if (wrote != len) {
-        Serial.printf("NVRAM save failed: %u of %u bytes, old save kept\n",
-                      (unsigned)wrote, (unsigned)len);
-        SD.remove(SD_PATH("save.tmp"));
-        last_nvram_hash = 0;  // try again next interval
-        return;
-    }
-    SD.remove(SD_PATH(SAVE_NAME));
-    if (!SD.rename(SD_PATH("save.tmp"), SD_PATH(SAVE_NAME))) {
-        Serial.println("NVRAM save failed: rename, data is in save.tmp");
-        last_nvram_hash = 0;
-        return;
-    }
-    Serial.printf("NVRAM saved (%u bytes, %lu ms)\n", (unsigned)len,
-                  (unsigned long)(millis() - t0));
+    saving = true;
+    while (wait && saving)
+        save_step();
 }
 
 // ---------------------------------------------------------------------------
@@ -1539,7 +1731,7 @@ static void apply_config(void) {
         shown_scale = g_cfg.scale;
         shown_valid = false;
         if (emu_screen_shown()) {
-            tft.dmaWait();
+            panel_finish();
             tft.fillRect(0, BORDER_TOP, SCALED_W, SCALED_H, TFT_BLACK);
         }
     }
@@ -1595,7 +1787,7 @@ static void hook_restart(void *ctx, const rb_config_t *c) {
     (void)ctx;
     g_cfg = *c;
     save_config();
-    save_nvram(emu);
+    save_nvram(emu, true);
     Serial.println("restart from the menu");
     Serial.flush();
     delay(100);
@@ -1631,7 +1823,7 @@ static bool hook_switch_machine(void *ctx, const rb_config_t *c) {
     }
     g_cfg = *c;
     save_config();
-    save_nvram(emu);
+    save_nvram(emu, true);
     if (esp_ota_set_boot_partition(other) != ESP_OK) {
         Serial.printf("%s in %s did not verify\n", OTHER_MACHINE, other->label);
         return false;
@@ -1676,7 +1868,7 @@ static void fit_text(char *s, int max_w) {
 }
 
 static void draw_menu(void) {
-    tft.dmaWait();
+    panel_finish();
     tft.fillScreen(MENU_BG);
     tft.fillRect(0, 0, 320, 24, MENU_PANEL);
     tft.drawFastHLine(0, 24, 320, MENU_ACCENT);
@@ -1770,7 +1962,7 @@ static void menu_input(int result) {
     g_cfg = menu.cfg;
     save_config();
     release_all_keys();
-    tft.dmaWait();
+    panel_finish();
     tft.fillScreen(TFT_BLACK);
     shown_valid = false;
     apply_config();
@@ -1950,6 +2142,8 @@ void setup() {
     uint8_t *flash_data = NULL;
     if (SD.exists(SD_PATH(SAVE_NAME)))
         flash_data = load_sd_file(SD_PATH(SAVE_NAME), &flash_size);
+    // a save of the whole chip can be updated page by page from now on
+    save_card_whole = flash_data && flash_size == AT45_SIZE;
     if (!flash_data)
         flash_data = load_sd_file(SD_PATH("flash.bin"), &flash_size);
 #else
@@ -2134,7 +2328,7 @@ void setup() {
     tft.startWrite();
     tft.pushImageDMA(0, 0, 320, 20, diag_px);
     tft.endWrite();
-    tft.dmaWait();
+    panel_finish();
     diag_spi("after one DMA frame");
 #endif
 
@@ -2252,7 +2446,7 @@ void loop() {
      * sit on an SX1262 packet for a whole timeslice. If DIO1 is high the
      * chip has a packet; wait out display DMA so we actually read it. */
     if (digitalRead(PIN_RADIO_DIO1) == HIGH && tft.dmaBusy())
-        tft.dmaWait();
+        panel_finish();
     cybiko_sx1262_pump();
     cybiko_run_frame(emu);
 #ifdef CYBIKO_MACHINE_V1
@@ -2266,7 +2460,7 @@ void loop() {
     count_i2s_underruns();
 
     if (digitalRead(PIN_RADIO_DIO1) == HIGH && tft.dmaBusy())
-        tft.dmaWait();
+        panel_finish();
     cybiko_sx1262_pump();
     {
         bool sof = usb_host_via_sof();
@@ -2395,17 +2589,18 @@ void loop() {
             last_nvram_save_ms = now;
         }
         if (writes != last_nvram_hash && now - last_nvram_save_ms >= FLASH_SAVE_QUIET_MS) {
-            save_nvram(emu);
+            save_nvram(emu, false);
             last_nvram_save_ms = now;
         }
     }
 #else
     // Auto-save NVRAM every 5 minutes
     if (now - last_nvram_save_ms >= NVRAM_SAVE_INTERVAL_MS) {
-        save_nvram(emu);
+        save_nvram(emu, false);
         last_nvram_save_ms = now;
     }
 #endif
 
+    save_step();
     pace_frame();
 }
