@@ -78,7 +78,7 @@ The `--app` flag injects `.app` files into the CFS filesystem before boot:
 This machine has no cmake; use the Makefile:
 
 ```bash
-make test                 # unit tests, including test_radio and test_lora
+make test                 # unit tests, including test_radio, test_sci0 (the Classic SCI0) and test_lora
 make harness              # radio link across a 64-byte PHY MTU
 make build/two_boot       # two XT CyOS instances chatting on radio_sim
 make build/cybiko-emu     # SDL frontend; --radio /dev/ttyUSB0 for a Heltec

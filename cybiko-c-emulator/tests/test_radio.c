@@ -265,34 +265,6 @@ static void test_bad_crc_injected(void) {
     TEST_CHECK(node[0].dec.stat_crc >= 1);
 }
 
-static size_t v2_beacon(void *user, uint8_t *dst, size_t cap) {
-    (void)user;
-    if (cap < 42) return 0;
-    beacon(dst);
-    return 42;
-}
-
-static void test_v2_beacon_uses_small_indicator(void) {
-    setup_n(2, 255);
-    cybiko_radio_coproc_set_v2(&cpu[0], true);
-    cybiko_radio_coproc_set_v2_beacon(&cpu[0], v2_beacon, 0);
-    cybiko_radio_coproc_receive(&cpu[0], 0x30);
-    cybiko_radio_coproc_receive(&cpu[0], 0x00);
-    /* No peer frame yet: ACK, large/null indicator, 200 zero bytes. */
-    TEST_CHECK(cybiko_radio_coproc_read(&cpu[0]) == 0x03);
-    TEST_CHECK(cybiko_radio_coproc_read(&cpu[0]) == 0xC8);
-
-    radio_sim_bus_pump(&bus);
-    TEST_CHECK(cybiko_radio_coproc_pending(&cpu[1]) == 1);
-
-    cybiko_radio_coproc_receive(&cpu[1], 0x01);
-    cybiko_radio_coproc_receive(&cpu[1], 0x04);
-    cybiko_radio_coproc_receive(&cpu[1], 0x00);
-    TEST_CHECK(cybiko_radio_coproc_read(&cpu[1]) == 0x03);
-    TEST_CHECK(cybiko_radio_coproc_rx_count(&cpu[1]) == 0);
-    TEST_CHECK(cybiko_radio_coproc_pending(&cpu[1]) == 1);
-}
-
 static void test_address_header_kept(void) {
     setup_n(3, 255);
     uint8_t payload[42], raw[64];
@@ -349,7 +321,6 @@ TEST_LIST = {
     { "loss, duplicate, latency, three peers", test_loss_dup_latency_peers },
     { "async delivery and V1 null exchange", test_async_and_v1_paths },
     { "bad CRC is not delivered", test_bad_crc_injected },
-    { "V2 beacon and init clears the UART queue", test_v2_beacon_uses_small_indicator },
     { "the address header crosses unchanged", test_address_header_kept },
     { "Classic AVR replies", test_classic_avr_replies },
     { NULL, NULL }

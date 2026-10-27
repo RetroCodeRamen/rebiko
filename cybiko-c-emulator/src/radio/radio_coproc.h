@@ -46,13 +46,13 @@ extern "C" {
 #define CYBIKO_RADIO_ACK         0x03
 #define CYBIKO_RADIO_HDR         8      /* destination CyID, sender CyID */
 
+/* The frame CyOS last started: 0x30 a small (50-byte) one, 0xCF a large
+ * (200-byte) one. The Java emulator called them poll and scan. */
 typedef enum {
-    CYBIKO_RADIO_CMD_NONE = 0,
-    CYBIKO_RADIO_CMD_POLL = 1,
-    CYBIKO_RADIO_CMD_SCAN = 2
-} cybiko_radio_cmd_t;
-
-typedef size_t (*cybiko_radio_beacon_fn)(void *user, uint8_t *dst, size_t cap);
+    CYBIKO_RADIO_FRAME_NONE = 0,
+    CYBIKO_RADIO_FRAME_SMALL = 1,
+    CYBIKO_RADIO_FRAME_LARGE = 2
+} cybiko_radio_frame_kind_t;
 
 typedef struct {
     uint8_t  data[CYBIKO_RADIO_MAX_PAYLOAD];
@@ -63,7 +63,6 @@ typedef struct {
 typedef struct cybiko_radio_coproc {
     cybiko_radio_transport_t *transport;
     bool v1_mode;
-    bool v2_mode;
     bool classic;                /* replies as the Classic's AVR firmware */
     bool initialized;
     bool v1_accum;
@@ -71,7 +70,7 @@ typedef struct cybiko_radio_coproc {
     bool async_rx_pending;
     uint8_t current_channel;
     bool channel_set;            /* CyOS has tuned; frames on other channels are dropped */
-    cybiko_radio_cmd_t last_command;
+    cybiko_radio_frame_kind_t last_frame;
 
     uint8_t cmd[3];
     int cmd_pos;
@@ -88,9 +87,6 @@ typedef struct cybiko_radio_coproc {
     int rxq_tail;
     int rxq_count;
 
-    cybiko_radio_beacon_fn beacon_fn;
-    void *beacon_user;
-
     uint32_t stat_tx;
     uint32_t stat_tx_drop;
     uint32_t stat_rx;
@@ -103,10 +99,7 @@ typedef struct cybiko_radio_coproc {
 void cybiko_radio_coproc_init(cybiko_radio_coproc_t *c);
 void cybiko_radio_coproc_set_transport(cybiko_radio_coproc_t *c, cybiko_radio_transport_t *t);
 void cybiko_radio_coproc_set_v1(cybiko_radio_coproc_t *c, bool v1);
-void cybiko_radio_coproc_set_v2(cybiko_radio_coproc_t *c, bool v2);
 void cybiko_radio_coproc_set_classic(cybiko_radio_coproc_t *c, bool classic);
-void cybiko_radio_coproc_set_v2_beacon(cybiko_radio_coproc_t *c,
-                                      cybiko_radio_beacon_fn fn, void *user);
 
 void cybiko_radio_coproc_receive(cybiko_radio_coproc_t *c, uint8_t value);
 void cybiko_radio_coproc_handle_transmit(cybiko_radio_coproc_t *c,

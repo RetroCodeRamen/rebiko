@@ -5,7 +5,7 @@ ReBiko runs unmodified CyOS on new hardware:
 - **ReBiko Pocket:** the original LilyGO T-Deck (ESP32-S3, ST7789, SX1262).
 - **ReBiko Desktop:** a PC, with a Heltec V3 running **ReBiko Radio** as its LoRa radio.
 
-LoRa is a transport under the emulated AVR radio co-processor, not a new Cybiko application. The Cybiko Classic (V1, CyOS 1.2.46) is the main machine. The Xtreme (XT, CyOS 1.5.08) is the second.
+LoRa is a transport under the emulated AVR radio co-processor, not a new Cybiko application. The Cybiko Classic (V1, CyOS 1.2.46, or 1.2.57 after the System Pack update) is the main machine. The Xtreme (XT, CyOS 1.5.08) is the second.
 
 The work order is [PLAN.md](PLAN.md). The latest measured numbers are in [README.md](README.md) and [cybiko-lilygo/README.md](cybiko-lilygo/README.md#performance).
 
@@ -100,26 +100,28 @@ XT frames drop their trailing status byte (51→50, 201→200). V1 frames have n
 
 Local `03` bytes come from the emulated AVR when a frame has gone out. They are not a claim that a peer received it. The link layer does not emit its own ACK.
 
-The Classic replies as its AVR firmware does (`avr19c6.bin`, in CyOS 1.2.57's `System.a`): nothing to an `01` command, `03` after a frame, and a `32`/`C8` frame start only when a received frame is waiting. `30` and `CF` start a small (50-byte) or large (200-byte) frame. Neither the firmware nor CyOS relays a frame; `tools/v1_three.sh` with `CHAIN=1` checks that. The Xtreme's AVR firmware is not available, so its replies stay as the Java emulator's: `03` to every command, and after a frame `32` for a small queued frame or an empty queue, `C8` for a large one. Poll (`30`) will not dequeue a frame longer than 50 bytes; that frame waits for scan (`CF`).
+The Classic replies as its AVR firmware does (`avr19c6.bin`, in CyOS 1.2.57's `System.a`): nothing to an `01` command, `03` after a frame, and a `32`/`C8` frame start only when a received frame is waiting. `30` and `CF` start a small (50-byte) or large (200-byte) frame. Neither the firmware nor CyOS relays a frame; `tools/v1_three.sh` with `CHAIN=1` checks that. The Xtreme's AVR firmware is not available, so its replies stay as the Java emulator's: `03` to every command, and after a frame `32` for a small queued frame or an empty queue, `C8` for a large one. After a small frame (`30`) the co-processor does not hand over a waiting frame longer than 50 bytes; it waits for a large one (`CF`) or for the idle delivery.
 
-The Java co-processor waits up to 15 ms inside `complete_tx_dtc`. That wait is not ported. A 192-byte chat payload plus the 16-byte link header is about 82 ms on the air at SF7/500 kHz/4/5; a 42-byte beacon is about 28 ms. Frames that arrive later are delivered by `try_async` when the guest radio is idle.
+The Java co-processor waits up to 15 ms inside `complete_tx_dtc`. That wait is not ported. A 200-byte Chat frame plus the 16-byte link header is about 86 ms on the air at SF7/500 kHz/4/5; a 50-byte presence frame is about 31 ms. Frames that arrive later are delivered by `try_async` when the guest radio is idle.
 
 The T-Deck attaches the co-processor after the SX1262 starts. `CYBIKO_RADIO_TX=1` (set in `platformio.ini`) lets it transmit. Without that flag the board receives only. CyOS sends nothing until wireless is on in its settings (`settings.dat`).
 
 ### The Classic radio (SCI0)
 
-CyOS 1.2.46 schedules its own radio, and the emulator only has to model the hardware it uses:
+CyOS schedules its own radio, and the emulator only has to model the hardware it uses (addresses are 1.2.46's):
 
 - **The scheduler.** Posting a job (`0x214A6C`) or finishing one calls the radio tick (`0x214760`) with a random back-off. The tick loads TCNT1 and enables OVIE, and TMR1's overflow interrupt calls the tick again, which starts TXI0.
 - **The bug that blocked Chat.** TMR overflow interrupts must be level-sensitive. OVF1 is set early in boot with OVIE off and never cleared, so an edge-only OVI meant CyOS's radio never ran. The Java emulator worked around that with a poll/scan "driver" that guessed at CyOS's RAM. That driver caused lost, late, echoed and junk Chat frames. It is gone, and must not come back.
-- **What `sci0_v1.c` does.** It models the UART, hands received frames to CyOS while its radio is idle, and keeps the CyID at `0x21F9DC` set to the radio id.
+- **What `sci0_v1.c` does.** It models the UART, hands received frames to CyOS while its radio is idle, and keeps CyOS's CyID cache set to the radio id. 1.2.46 sends a frame byte by byte through TXI0. 1.2.57 moves it by DTC (DTCERE `0xFFFF34`, TX block `0xFFFBC4`, RX block `0xFFFBB8`), as the Xtreme does; `sci0_v1.c` switches to that when CyOS first starts one, and back on reboot. Each version's radio object and CyID cache are in `V1_LAYOUTS`, chosen by the version string in RAM (1.2.46 CyID `0x21F9DC`, 1.2.57 `0x222CF4`). `tests/test_sci0.c` in `cybiko-c-emulator` covers the DTC path.
 
 Frames on the air are CyOS's own:
 
 | Frame | Type byte | Size |
 |---|---|---|
-| Presence | `0x00` | 42 bytes |
-| Chat room joins and messages | `0x20` / `0x28` | 42 or 192 bytes |
+| Presence | `0x00` | 50 bytes |
+| Chat room joins and messages | `0x20` / `0x28` | 50 or 200 bytes |
+
+Sizes include the 8-byte address header; the type is the byte after the channel byte.
 
 CyOS sends each Chat message 3 times. Nicknames are CyOS's own (set on first boot, or in About Me).
 
@@ -132,12 +134,13 @@ Host checks for the Classic, in `cybiko-lilygo/tools/`:
 | `v1_boot.sh` | One Classic boots, compared against Java's STATUS line |
 | `v1_two.sh` | Two Classics on `radio_sim` |
 | `v1_chat.sh` | Two Classics walk into Chat MAIN and each sees the other's line |
+| `v1_three.sh` | Three Classics in Chat MAIN; `CHAIN=1` puts A and C out of each other's range and checks nothing is relayed |
 
 `v1_airchat.c` predates the fix and still looks for the old type `0x01` beacons.
 
 ## Link layer and PHY
 
-SX1262 explicit-header mode carries at most 255 bytes. Current CyOS payloads are 42 or 192 bytes. With a 16-byte link header they fit in one PHY packet (58 and 208 bytes). Fragmentation still exists so a smaller MTU does not need a CyOS change.
+SX1262 explicit-header mode carries at most 255 bytes. CyOS frames are 50 or 200 bytes. With a 16-byte link header they fit in one PHY packet (66 and 216 bytes). Fragmentation still exists so a smaller MTU does not need a CyOS change.
 
 ```
 0     magic 0xC7
@@ -226,11 +229,11 @@ Compile-time switch in `cybiko-lilygo/lib/cybiko_core/src/core/machine.h`. The X
 |---|---|---|
 | CPU clock | H8S/2323 @ 18.432 MHz | H8S/2241 @ 11.0592 MHz |
 | RAM | 2 MB @ 0x400000 | 512 KB @ 0x200000 |
-| Storage | memory-mapped flash + CFS in RAM | AT45DB041 on SCI1 |
+| Storage | memory-mapped flash + CFS in RAM | AT45DB081 (1 MB; the real Classic has the 512 KB AT45DB041) on SCI1 |
 | Radio UART | SCI2 + DTC | SCI0, interrupt-driven |
 | Card folder | `/cybiko/` | `/cybiko-v1/` |
 | Stride on device | 20 | 12 |
-| Hardware | boots CyOS 1.5.08 to home (~70 s); CyOS frames over LoRa not tested | boots CyOS 1.2.46 at 60 fps; Chat over LoRa with ReBiko Desktop |
+| Hardware | boots CyOS 1.5.08 to home (~70 s); CyOS frames over LoRa not tested | boots CyOS 1.2.46 or 1.2.57 at 60 fps; Chat over LoRa with ReBiko Desktop |
 
 The H8S takes no interrupt immediately after LDC/ANDC/ORC/XORC to CCR (`irq_hold`). CyOS's scheduler relies on that. Without it, boots freeze on the logo at some strides.
 

@@ -100,13 +100,7 @@ void cybiko_radio_coproc_set_transport(cybiko_radio_coproc_t *c, cybiko_radio_tr
 }
 
 void cybiko_radio_coproc_set_v1(cybiko_radio_coproc_t *c, bool v1) { c->v1_mode = v1; }
-void cybiko_radio_coproc_set_v2(cybiko_radio_coproc_t *c, bool v2) { c->v2_mode = v2; }
 void cybiko_radio_coproc_set_classic(cybiko_radio_coproc_t *c, bool classic) { c->classic = classic; }
-void cybiko_radio_coproc_set_v2_beacon(cybiko_radio_coproc_t *c,
-                                      cybiko_radio_beacon_fn fn, void *user) {
-    c->beacon_fn = fn;
-    c->beacon_user = user;
-}
 
 static void send_payload(cybiko_radio_coproc_t *c, const uint8_t *payload, size_t len, uint8_t channel) {
     if (!c->transport || !c->transport->send_packet) {
@@ -166,7 +160,7 @@ int cybiko_radio_coproc_complete_tx_dtc(cybiko_radio_coproc_t *c) {
     c->v1_accum = false;
     c->rx_frame_ready = false;
     cybiko_radio_frame_t *next = peek_frame(c);
-    bool held = next && c->last_command == CYBIKO_RADIO_CMD_POLL && next->len > 50;
+    bool held = next && c->last_frame == CYBIKO_RADIO_FRAME_SMALL && next->len > 50;
     if (c->classic && (!next || held))
         return -1;   /* the AVR says only 0x03 */
     if (!next || held)
@@ -184,21 +178,6 @@ int cybiko_radio_coproc_try_async(cybiko_radio_coproc_t *c) {
     return indicator;
 }
 
-static void v2_queue_response(cybiko_radio_coproc_t *c) {
-    rxq_push(c, CYBIKO_RADIO_ACK);
-    c->rx_frame_ready = false;
-    int indicator;
-    if (c->q_count > 0) {
-        c->rx_frame_ready = true;
-        /* V2 treats 0xC8 as "discard". Real data always uses the 50-byte window. */
-        indicator = CYBIKO_RADIO_IND_SMALL;
-    } else {
-        indicator = CYBIKO_RADIO_IND_LARGE;
-    }
-    rxq_push(c, (uint8_t)indicator);
-    cybiko_radio_coproc_prepare_rx(c, indicator == CYBIKO_RADIO_IND_LARGE ? 200 : 50);
-}
-
 void cybiko_radio_coproc_v1_tx_complete(cybiko_radio_coproc_t *c) {
     if (!c->v1_accum) return;
     c->v1_accum = false;
@@ -209,11 +188,11 @@ void cybiko_radio_coproc_v1_tx_complete(cybiko_radio_coproc_t *c) {
     c->rx_frame_ready = false;
     int indicator;
     cybiko_radio_frame_t *next = peek_frame(c);
-    if (c->classic && (!next || (c->last_command == CYBIKO_RADIO_CMD_POLL && next->len > 50)))
+    if (c->classic && (!next || (c->last_frame == CYBIKO_RADIO_FRAME_SMALL && next->len > 50)))
         return;   /* the AVR says only 0x03 */
     if (!next) {
         indicator = CYBIKO_RADIO_IND_LARGE;
-    } else if (c->last_command == CYBIKO_RADIO_CMD_POLL && next->len > 50) {
+    } else if (c->last_frame == CYBIKO_RADIO_FRAME_SMALL && next->len > 50) {
         indicator = CYBIKO_RADIO_IND_LARGE;
     } else {
         indicator = (next->len > 50) ? CYBIKO_RADIO_IND_LARGE : CYBIKO_RADIO_IND_SMALL;
@@ -245,23 +224,13 @@ static void process_command3(cybiko_radio_coproc_t *c, uint8_t cmd, uint8_t para
 }
 
 static void process_command2(cybiko_radio_coproc_t *c, uint8_t header) {
-    if (header == 0x30) c->last_command = CYBIKO_RADIO_CMD_POLL;
-    else if (header == 0xCF) c->last_command = CYBIKO_RADIO_CMD_SCAN;
+    if (header == 0x30) c->last_frame = CYBIKO_RADIO_FRAME_SMALL;
+    else if (header == 0xCF) c->last_frame = CYBIKO_RADIO_FRAME_LARGE;
 
-    if (c->v1_mode && !c->v2_mode) {
+    if (c->v1_mode) {
         c->v1_accum = true;
         c->v1_len = 0;
     }
-    if (c->v2_mode && c->beacon_fn) {
-        uint8_t beacon[CYBIKO_RADIO_MAX_PAYLOAD];
-        size_t n = c->beacon_fn(c->beacon_user, beacon, sizeof beacon);
-        if (n > 0) {
-            uint8_t ch = beacon[0] & 0x3F;
-            send_payload(c, beacon, n, ch);
-        }
-    }
-    if (c->v2_mode)
-        v2_queue_response(c);
 }
 
 void cybiko_radio_coproc_receive(cybiko_radio_coproc_t *c, uint8_t value) {

@@ -13,9 +13,9 @@ OUT := build
 
 .PHONY: test harness clean
 
-test: $(CORE_TESTS:%=$(OUT)/test_%) $(OUT)/test_radio $(OUT)/test_lora $(OUT)/test_tdeck_keymap
+test: $(CORE_TESTS:%=$(OUT)/test_%) $(OUT)/test_radio $(OUT)/test_sci0 $(OUT)/test_lora $(OUT)/test_tdeck_keymap
 	@fail=0; \
-	for t in $(CORE_TESTS:%=$(OUT)/test_%) $(OUT)/test_radio $(OUT)/test_lora $(OUT)/test_tdeck_keymap; do \
+	for t in $(CORE_TESTS:%=$(OUT)/test_%) $(OUT)/test_radio $(OUT)/test_sci0 $(OUT)/test_lora $(OUT)/test_tdeck_keymap; do \
 		echo "== $$t"; \
 		$$t || fail=1; \
 	done; \
@@ -29,6 +29,10 @@ $(OUT):
 
 $(OUT)/test_%: tests/test_%.c $(CORE) $(RADIO) | $(OUT)
 	$(CC) $(CFLAGS) -o $@ tests/test_$*.c $(CORE) $(RADIO)
+
+# The Classic's SCI0 (sci0_v1.c) is built only by the T-Deck's V1 core
+$(OUT)/test_sci0: tests/test_sci0.c src/radio/sci0_v1.c $(RADIO) | $(OUT)
+	$(CC) $(CFLAGS) -o $@ tests/test_sci0.c src/radio/sci0_v1.c $(RADIO)
 
 $(OUT)/test_tdeck_keymap: tests/test_tdeck_keymap.c $(KEYMAP) | $(OUT)
 	$(CC) $(CFLAGS) -o $@ tests/test_tdeck_keymap.c $(KEYMAP)

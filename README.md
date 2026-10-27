@@ -186,7 +186,7 @@ Right-click → **Status**. This is the radio health panel, not a CyOS screen.
 
 | Piece | Role |
 | --- | --- |
-| **ReBiko Desktop** | Borderless photo shell, original CyOS 1.2.46, Heltec as the air interface |
+| **ReBiko Desktop** | Borderless photo shell, original CyOS (1.2.46, or 1.2.57 after Cybiko's System Pack update), Heltec as the air interface |
 | **ReBiko Pocket** | T-Deck handheld that *is* the Cybiko — keyboard, LCD, trackball, LoRa, battery |
 | **ReBiko Radio** | Heltec V3 USB SLIP modem so the PC can share the same 915 MHz channel |
 
@@ -196,16 +196,18 @@ The guest is unmodified CyOS. This is not a Cybiko-style rewrite. Design notes l
 
 ## Status
 
-Honest snapshot, 26 Oct 2026.
+Honest snapshot, 27 Oct 2026.
 
 | Have today | Still cooking |
 | --- | --- |
 | ReBiko Desktop on Linux and Windows | One-click flash pack with no PlatformIO |
-| Heltec auto-detect + ReBiko Radio OLED | CyOS app loader from the PC |
+| Heltec auto-detect + ReBiko Radio OLED | Apps on the Xtreme |
 | ReBiko Pocket (T-Deck Classic firmware) | XT battery on Port A |
 | PC ↔ T-Deck Chat over LoRa, rooms kept apart | Native Windows click-through window shape |
 | T-Deck volume 0–10, settings saved 10 s after a change | Longest range with no lost messages (22 dBm, link view) |
 | ReBiko Pocket menu (`$` Mic): key remapping, CPU mode, display, audio | |
+| Apps on and off a running Classic, from the Desktop's Apps window or `rebiko_apps.py` | |
+| CyOS 1.2.57 and full Cylandia (`rebiko_cyos_update.py`) | |
 | | Private messages, the people list and multiplayer games over the air |
 
 Chat over the air works now. The bench test is the PC on a Heltec and a T-Deck in Chat MAIN, 3 lines each way, and it passes 6/6. v1.1026.3b is the first download with it; Chat in v1.1026.2b and earlier doesn't work.
@@ -222,7 +224,7 @@ Chat over the air works now. The bench test is the PC on a Heltec and a T-Deck i
 | `/cybiko/apps/*.app` | Injected into that save before boot if the name is new |
 | `/cybiko-v1/boot.bin` | Classic boot ROM (`cyrom112.bin`) |
 | `/cybiko-v1/flash.bin` | CyOS 1.2.46 (`flash_v1246.bin`) |
-| `/cybiko-v1/save.flash` | AT45DB041 image, written 10 s after CyOS's last change |
+| `/cybiko-v1/save.flash` | Flash chip image (1 MB), written 10 s after CyOS's last change |
 
 Classic dumps ride along in the zip. They stay out of git. XT dumps and `.app` files stay off both.
 
