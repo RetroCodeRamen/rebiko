@@ -32,6 +32,8 @@ const char *cybiko_sx1262_last_error(void);
 /* NULL until begin succeeded. */
 cybiko_radio_transport_t *cybiko_sx1262_transport(void);
 const cybiko_lora_t *cybiko_sx1262_link(void);
+/* ReBiko's own messages on CYBIKO_LORA_PING_CHANNEL (see radio_lora.h) */
+void cybiko_sx1262_on_control(void (*fn)(void *, const uint8_t *, size_t, uint32_t), void *user);
 
 /* Once per frame from the main loop, never from the CPU loop. */
 void cybiko_sx1262_pump(void);

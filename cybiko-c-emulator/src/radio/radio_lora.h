@@ -35,8 +35,10 @@ typedef struct {
     uint32_t rx_lost;       /* gaps in a sender's message ids: never heard */
 } cybiko_lora_stats_t;
 
-/* Range-test pings go out on a channel CyOS never tunes, so every
- * co-processor drops them and only the link counters see them. */
+/* ReBiko's own messages go out on a channel CyOS never tunes, so every
+ * co-processor drops them: range-test pings, and "TIME <seconds>" from
+ * ReBiko Desktop (local time as seconds since 1970), which T-Decks set
+ * their clock from. on_control sees each of them. */
 #define CYBIKO_LORA_PING_CHANNEL 0
 
 /* Senders whose next message id is tracked for rx_lost. */
@@ -52,6 +54,8 @@ typedef struct {
     bool tx_enabled;
     cybiko_radio_on_packet_fn fn;
     void *fn_user;
+    void (*on_control)(void *user, const uint8_t *data, size_t len, uint32_t sender);
+    void *control_user;
     cybiko_link_decoder_t dec;
     struct {
         uint16_t len;

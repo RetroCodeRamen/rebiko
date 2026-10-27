@@ -290,8 +290,44 @@ static void test_cycle_count(void) {
     teardown();
 }
 
+/* MULXU.B Rs, Rd multiplies by the LOW byte of the word register Rd */
+static void test_mulxu_b_low_byte(void) {
+    setup();
+    cpu.er[0] = 0x0000AB03;            /* R0H 0xAB, R0L 3 */
+    cpu.er[1] = 0x0000000A;            /* R1L 10 */
+    write_code16(CODE_OFFSET, 0x5090); /* MULXU.B R1L, R0 */
+    h8s_cpu_step(&cpu);
+    TEST_CHECK_((cpu.er[0] & 0xFFFF) == 30, "R0 should be 3 x 10 = 30, got %u",
+                (unsigned)(cpu.er[0] & 0xFFFF));
+    teardown();
+
+    setup();
+    cpu.er[0] = 0x0005AB03;            /* E0 = 5, R0 = 0xAB03 */
+    cpu.er[1] = 0x0000000A;
+    write_code16(CODE_OFFSET, 0x5098); /* MULXU.B R1L, E0 */
+    h8s_cpu_step(&cpu);
+    TEST_CHECK_((cpu.er[0] >> 16) == 50, "E0 should be 5 x 10 = 50, got %u",
+                (unsigned)(cpu.er[0] >> 16));
+    TEST_CHECK((cpu.er[0] & 0xFFFF) == 0xAB03);
+    teardown();
+}
+
+static void test_mulxs_b_low_byte(void) {
+    setup();
+    cpu.er[0] = 0x00007FFD;            /* R0H 0x7F, R0L -3 */
+    cpu.er[1] = 0x0000000A;
+    write_code16(CODE_OFFSET, 0x01C0); /* MULXS.B R1L, R0 */
+    write_code16(CODE_OFFSET + 2, 0x5090);
+    h8s_cpu_step(&cpu);
+    TEST_CHECK_((cpu.er[0] & 0xFFFF) == 0xFFE2, "R0 should be -30, got 0x%04X",
+                (unsigned)(cpu.er[0] & 0xFFFF));
+    teardown();
+}
+
 TEST_LIST = {
     { "nop",              test_nop },
+    { "mulxu_b_low_byte", test_mulxu_b_low_byte },
+    { "mulxs_b_low_byte", test_mulxs_b_low_byte },
     { "mov_b_imm",        test_mov_b_imm },
     { "mov_b_imm_zero",   test_mov_b_imm_zero },
     { "mov_b_imm_negative", test_mov_b_imm_negative },

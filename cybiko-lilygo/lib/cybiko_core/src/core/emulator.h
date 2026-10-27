@@ -92,6 +92,14 @@ const uint8_t *cybiko_get_spi_flash(const cybiko_emu_t *emu, size_t *len, uint32
  * how many; 0 on the Xtreme. A save can rewrite just these pages. */
 int cybiko_take_spi_flash_dirty(cybiko_emu_t *emu, uint8_t *bits, size_t n);
 
+struct tm;
+/* The guest's clock chip. take_written: true once after the guest set
+ * the time (CyOS Settings). get: the year is the one nearest year_hint
+ * with the chip's year % 4. set: from the host, e.g. a time broadcast. */
+bool cybiko_rtc_take_written(cybiko_emu_t *emu);
+void cybiko_rtc_get(const cybiko_emu_t *emu, struct tm *out, int year_hint);
+void cybiko_rtc_set(cybiko_emu_t *emu, const struct tm *tm);
+
 /* Cybiko Classic ADC result, 10-bit, channels 0-3. Channels 1 and 2 feed
  * CyOS's battery gauge. No effect on the Xtreme. */
 void cybiko_set_adc(cybiko_emu_t *emu, int channel, uint16_t value);

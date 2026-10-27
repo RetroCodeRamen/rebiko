@@ -98,6 +98,8 @@ A frame goes on the air as CyOS wrote it, address header included (link version 
 
 XT frames drop their trailing status byte (51→50, 201→200). V1 frames have none. Anything of 9 bytes or fewer is an AVR command, not a frame, and is not transmitted. On receive, `prepare_rx` hands CyOS the frame unchanged, padded with `FF` to 50 or 200 bytes. The real AVR filters nothing, so a frame addressed to one Cybiko reaches every Cybiko in range, and CyOS on each decides. A null read (Xtreme) is filled with `00`, not `FF`: an all-`FF` buffer passes CyOS's broadcast check and leaks connection objects.
 
+Channel 0 is ReBiko's own: CyOS never tunes it, so co-processors drop it. It carries the T-Deck's range-test pings and ReBiko Desktop's `TIME <seconds>` (local time as seconds since 1970, every 30 s), which T-Decks set their clock from (`on_control` in `radio_lora.h`).
+
 Local `03` bytes come from the emulated AVR when a frame has gone out. They are not a claim that a peer received it. The link layer does not emit its own ACK.
 
 The Classic replies as its AVR firmware does (`avr19c6.bin`, in CyOS 1.2.57's `System.a`): nothing to an `01` command, `03` after a frame, and a `32`/`C8` frame start only when a received frame is waiting. `30` and `CF` start a small (50-byte) or large (200-byte) frame. Neither the firmware nor CyOS relays a frame; `tools/v1_three.sh` with `CHAIN=1` checks that. The Xtreme's AVR firmware is not available, so its replies stay as the Java emulator's: `03` to every command, and after a frame `32` for a small queued frame or an empty queue, `C8` for a large one. After a small frame (`30`) the co-processor does not hand over a waiting frame longer than 50 bytes; it waits for a large one (`CF`) or for the idle delivery.

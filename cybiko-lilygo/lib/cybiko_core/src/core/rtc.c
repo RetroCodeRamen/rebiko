@@ -31,6 +31,14 @@ static uint64_t get_monotonic_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
+/* Days in month m (1-12); the chip's year is year % 4, and 0 is a leap year
+ * from 2000 to 2099 */
+static int month_days(int m, int year4) {
+    static const uint8_t DAYS[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (m < 1 || m > 12) return 31;
+    return m == 2 && year4 == 0 ? 29 : DAYS[m - 1];
+}
+
 static void advance_seconds(rtc_t *rtc) {
     int sec = from_bcd(rtc->data[2]) + 1;
     if (sec < 60) { rtc->data[2] = to_bcd(sec); return; }
@@ -46,16 +54,64 @@ static void advance_seconds(rtc_t *rtc) {
 
     int day = from_bcd(rtc->data[5] & 0x3F) + 1;
     uint8_t year_bits = rtc->data[5] & 0xC0;
-    if (day <= 28) { rtc->data[5] = year_bits | to_bcd(day); return; }
-    /* Simplified: max 28 days per month */
+    int month = from_bcd(rtc->data[6] & 0x1F);
+    if (day <= month_days(month, year_bits >> 6)) { rtc->data[5] = year_bits | to_bcd(day); return; }
     rtc->data[5] = year_bits | to_bcd(1);
 
-    int month = from_bcd(rtc->data[6]) + 1;
-    if (month <= 12) { rtc->data[6] = to_bcd(month); return; }
-    rtc->data[6] = to_bcd(1);
+    month++;
+    if (month <= 12) { rtc->data[6] = (uint8_t)((rtc->data[6] & 0xE0) | to_bcd(month)); return; }
+    rtc->data[6] = (uint8_t)((rtc->data[6] & 0xE0) | to_bcd(1));
 
     int year = ((rtc->data[5] >> 6) & 3) + 1;
     rtc->data[5] = (uint8_t)(((year % 4) << 6) | (rtc->data[5] & 0x3F));
+}
+
+void rtc_get_tm(const rtc_t *rtc, struct tm *out, int year_hint) {
+    memset(out, 0, sizeof *out);
+    out->tm_sec = from_bcd(rtc->data[2] & 0x7F);
+    out->tm_min = from_bcd(rtc->data[3] & 0x7F);
+    out->tm_hour = from_bcd(rtc->data[4] & 0x3F);
+    out->tm_mday = from_bcd(rtc->data[5] & 0x3F);
+    out->tm_mon = from_bcd(rtc->data[6] & 0x1F) - 1;
+    int y4 = (rtc->data[5] >> 6) & 3, year = year_hint;
+    while (((year % 4) + 4) % 4 != y4) year++;
+    if (year - year_hint > 2) year -= 4;   /* the nearest one */
+    /* CyOS keeps the year's last two digits in register 7 */
+    int yy = from_bcd(rtc->data[7]);
+    if (yy < 100 && yy % 4 == y4)
+        year = 2000 + yy;
+    out->tm_year = year - 1900;
+    out->tm_isdst = -1;
+}
+
+void rtc_set_tm(rtc_t *rtc, const struct tm *tm) {
+    rtc->data[1] = 0x00;
+    rtc->data[2] = to_bcd(tm->tm_sec);
+    rtc->data[3] = to_bcd(tm->tm_min);
+    rtc->data[4] = to_bcd(tm->tm_hour);
+    rtc->data[5] = (uint8_t)(((tm->tm_year % 4) << 6) | to_bcd(tm->tm_mday));
+    rtc->data[6] = to_bcd(tm->tm_mon + 1);
+    rtc->data[7] = to_bcd(tm->tm_year % 100);   /* CyOS's year, 00-99 */
+    rtc->frac_ns = 0;
+}
+
+/* CyOS resets the clock to 00:00:00 on 1 January at every cold start: a
+ * real Cybiko only cold-started with its batteries out, because Power OFF
+ * kept CyOS and the clock running. ReBiko cold-starts CyOS at every power
+ * on, so that reset is put back to the host's time, which CyOS then reads.
+ * Any other time written is the user setting the clock (time_written). */
+static void time_set_by_guest(rtc_t *rtc) {
+    rtc->time_touched = false;
+    bool reset = rtc->data[2] == 0 && rtc->data[3] == 0 && rtc->data[4] == 0 &&
+                 (rtc->data[5] & 0x3F) == 0x01 && (rtc->data[6] & 0x1F) == 0x01;
+    if (!reset) {
+        rtc->time_written = true;
+        return;
+    }
+    time_t now = time(NULL);
+    if (now < 978307200)   /* before 2001: the host does not know the time either */
+        return;
+    rtc_set_tm(rtc, localtime(&now));
 }
 
 void cybiko_rtc_init(rtc_t *rtc) {
@@ -141,6 +197,8 @@ void rtc_scl_w(rtc_t *rtc, bool high) {
                 if (rtc->data_recv[0] == I2C_ADDR_WRITE && rtc->data_recv_index >= 2) {
                     int rtc_pos = (rtc->data_recv[1] + (rtc->data_recv_index - 2)) & 0x0F;
                     rtc->data[rtc_pos] = received;
+                    if (rtc_pos >= 1 && rtc_pos <= 6)
+                        rtc->time_touched = true;
                 }
 
                 rtc->bits = 0;
@@ -187,6 +245,8 @@ void rtc_sda_w(rtc_t *rtc, bool high) {
         if (state != 0 && rtc->pin_sda == 0) {
             rtc->active = false;
             rtc->inp = 1;
+            if (rtc->time_touched)
+                time_set_by_guest(rtc);
         }
     }
 

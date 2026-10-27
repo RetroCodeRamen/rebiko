@@ -53,6 +53,10 @@ cybiko_radio_transport_t *cybiko_sx1262_transport(void) {
 }
 
 const cybiko_lora_t *cybiko_sx1262_link(void) { return started ? &link_t : NULL; }
+void cybiko_sx1262_on_control(void (*fn)(void *, const uint8_t *, size_t, uint32_t), void *user) {
+    link_t.on_control = fn;
+    link_t.control_user = user;
+}
 
 void cybiko_sx1262_pump(void) {
     if (started)

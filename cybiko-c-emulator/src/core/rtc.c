@@ -31,6 +31,14 @@ static uint64_t get_monotonic_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
+/* Days in month m (1-12); the chip's year is year % 4, and 0 is a leap year
+ * from 2000 to 2099 */
+static int month_days(int m, int year4) {
+    static const uint8_t DAYS[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (m < 1 || m > 12) return 31;
+    return m == 2 && year4 == 0 ? 29 : DAYS[m - 1];
+}
+
 static void advance_seconds(rtc_t *rtc) {
     int sec = from_bcd(rtc->data[2]) + 1;
     if (sec < 60) { rtc->data[2] = to_bcd(sec); return; }
@@ -46,13 +54,13 @@ static void advance_seconds(rtc_t *rtc) {
 
     int day = from_bcd(rtc->data[5] & 0x3F) + 1;
     uint8_t year_bits = rtc->data[5] & 0xC0;
-    if (day <= 28) { rtc->data[5] = year_bits | to_bcd(day); return; }
-    /* Simplified: max 28 days per month */
+    int month = from_bcd(rtc->data[6] & 0x1F);
+    if (day <= month_days(month, year_bits >> 6)) { rtc->data[5] = year_bits | to_bcd(day); return; }
     rtc->data[5] = year_bits | to_bcd(1);
 
-    int month = from_bcd(rtc->data[6]) + 1;
-    if (month <= 12) { rtc->data[6] = to_bcd(month); return; }
-    rtc->data[6] = to_bcd(1);
+    month++;
+    if (month <= 12) { rtc->data[6] = (uint8_t)((rtc->data[6] & 0xE0) | to_bcd(month)); return; }
+    rtc->data[6] = (uint8_t)((rtc->data[6] & 0xE0) | to_bcd(1));
 
     int year = ((rtc->data[5] >> 6) & 3) + 1;
     rtc->data[5] = (uint8_t)(((year % 4) << 6) | (rtc->data[5] & 0x3F));

@@ -120,14 +120,18 @@ static void lora_pump(cybiko_radio_transport_t *self) {
             t->stats.rx_bad++;
         } else if (rc == 1) {
             {
+                /* a CyOS frame: 8-byte address header, channel byte, type */
+                size_t skip = channel != CYBIKO_LORA_PING_CHANNEL && out_len > 9 ? 8 : 0;
                 char snip[24];
-                radio_snip(snip, sizeof snip, out, out_len);
+                radio_snip(snip, sizeof snip, out + skip, out_len - skip);
                 cybiko_radio_log("rx type=%02X len=%zu from %08X %s\n",
-                                 out_len > 1 ? out[1] : 0, out_len,
+                                 out_len > skip + 1 ? out[skip + 1] : 0, out_len,
                                  (unsigned)sender, snip);
             }
             t->stats.rx_msgs++;
             count_lost(t, sender, (uint16_t)((pkt[3] << 8) | pkt[4]));
+            if (channel == CYBIKO_LORA_PING_CHANNEL && t->on_control)
+                t->on_control(t->control_user, out, out_len, sender);
             if (t->fn)
                 t->fn(t->fn_user, out, out_len, channel, sender);
         }

@@ -37,7 +37,8 @@ A borderless Classic on Linux and Windows. CyOS 1.2.46 is in the release zip. An
 - **Battery and sleep.** The backlight steps from 4/4 to 1/4 (default 3/4). After 5 idle minutes CyOS blanks its LCD; the backlight goes off, drawing stops, and Dynamic mode drops the CPU to 160 MHz. A key wakes CyOS and the screen follows. The radio keeps running. The awake desktop stays at 240 MHz.
 - The T-Deck's top bar shows the LiPo level. CyOS's own gauge stays off. See [Battery gauge](#battery-gauge).
 - **Apps over USB.** `tools/rebiko_apps.py /dev/ttyACM0 ls|put|get|rm|reboot|cmd`, through CyOS's own console as CyberLoad did; files come off by reading the flash image.
-- The screen sends only changed rows, and waits for each DMA before releasing the panel (27 Oct 2026; releasing early left stale bands).
+- The screen sends only changed rows; the panel is released only after each DMA (releasing early left stale bands), and a rolling refresh resends what the panel should show. Saves rewrite only the flash pages CyOS changed (27 Oct 2026: a 1 MB save used to stop everything for 1.9 s).
+- **The clock keeps time** (27 Oct 2026). CyOS resets its clock chip at every cold start; ReBiko puts the time back. The T-Deck's time survives restarts, resumes after a power-off from the last time saved, and is set by CyOS's Settings or by ReBiko Desktop over LoRa. Fixing it found a CPU bug: `MULXU.B`/`MULXS.B` multiplied by the wrong byte, which broke every BCD conversion in CyOS and apps.
 
 ### Radio
 

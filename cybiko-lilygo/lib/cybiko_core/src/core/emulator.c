@@ -611,6 +611,20 @@ void cybiko_debug_run(cybiko_emu_t *emu, uint32_t pc, int n) {
     h8s_cpu_run(&emu->cpu, n);
 }
 
+bool cybiko_rtc_take_written(cybiko_emu_t *emu) {
+    bool w = emu->rtc.time_written;
+    emu->rtc.time_written = false;
+    return w;
+}
+
+void cybiko_rtc_get(const cybiko_emu_t *emu, struct tm *out, int year_hint) {
+    rtc_get_tm(&emu->rtc, out, year_hint);
+}
+
+void cybiko_rtc_set(cybiko_emu_t *emu, const struct tm *tm) {
+    rtc_set_tm(&emu->rtc, tm);
+}
+
 int cybiko_take_spi_flash_dirty(cybiko_emu_t *emu, uint8_t *bits, size_t n) {
 #if CYBIKO_HAS_SPI_FLASH
     uint8_t *d = emu->bus.spi_flash.dirty;

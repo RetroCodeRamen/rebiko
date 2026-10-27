@@ -52,6 +52,7 @@
 #include <limits.h>
 #include <math.h>
 #include <signal.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2259,6 +2260,29 @@ static bool apps_event(sdl_ctx_t *s, const SDL_Event *ev) {
 }
 #endif
 
+/* This PC's local time as seconds since 1970, counted as if it were UTC:
+ * T-Decks keep local time that way (they have no time zone) */
+static long long local_seconds(void) {
+    time_t now = time(NULL);
+    struct tm lt = *localtime(&now);
+    /* days from 1970-01-01 to the local date (Howard Hinnant's days_from_civil) */
+    int y = lt.tm_year + 1900 - (lt.tm_mon < 2), m = lt.tm_mon + 1;
+    int era = (y >= 0 ? y : y - 399) / 400;
+    int yoe = y - era * 400;
+    int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + lt.tm_mday - 1;
+    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    long long days = (long long)era * 146097 + doe - 719468;
+    return days * 86400 + lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec;
+}
+
+/* "TIME <seconds>" on ReBiko's control channel, which CyOS never tunes:
+ * T-Decks in range set their clock from it (radio_lora.h) */
+static void send_time(cybiko_lora_t *link) {
+    char msg[24];
+    int n = snprintf(msg, sizeof msg, "TIME %lld", local_seconds());
+    link->base.send_packet(&link->base, (const uint8_t *)msg, (size_t)n, CYBIKO_LORA_PING_CHANNEL);
+}
+
 static void attach_radio(cybiko_emu_t *emu, cybiko_radio_coproc_t *cop, uint32_t cyid) {
 #ifdef CYBIKO_MACHINE_V1
     cybiko_attach_radio_id(emu, cop, cyid);
@@ -3422,6 +3446,7 @@ int main(int argc, char **argv) {
     bool running = true;
     sdl.running = &running;
     uint32_t radio_at = SDL_GetTicks() + 10000;
+    uint32_t time_at = SDL_GetTicks() + 5000;
     uint32_t status_at = 0;
     /* Pace to a deadline 1/60 s apart. Waiting out 16 ms per frame ran the
      * guest 4% fast, and the audio queue grew by the difference. */
@@ -3513,6 +3538,10 @@ int main(int argc, char **argv) {
 #endif
         if (sdl.radio_on) {
             link.base.pump(&link.base);
+            if ((int32_t)(SDL_GetTicks() - time_at) >= 0) {
+                send_time(&link);
+                time_at = SDL_GetTicks() + 30000;
+            }
             if ((int32_t)(SDL_GetTicks() - radio_at) >= 0) {
                 radio_report(emu, &link, &phy);
                 radio_at += 10000;

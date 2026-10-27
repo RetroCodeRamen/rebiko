@@ -363,7 +363,7 @@ static void decode_mulxs(h8s_cpu_t *cpu, int hi2, uint16_t op2) {
     int rs = (op2 >> 4) & 0xF;
     int rd = op2 & 0xF;
     if (hi2 == 0x50) {
-        int result = (int8_t)get_reg_b(cpu, rs) * (int8_t)get_reg_b(cpu, rd);
+        int result = (int8_t)get_reg_b(cpu, rs) * (int8_t)(get_r(cpu, rd) & 0xFF);   /* as MULXU.B */
         set_r(cpu, rd, (uint16_t)(result & 0xFFFF));
         set_flag(cpu, BIT_N, (result & 0x8000) != 0);
         set_flag(cpu, BIT_Z, (result & 0xFFFF) == 0);
@@ -1194,9 +1194,12 @@ static void decode1(h8s_cpu_t *cpu, uint16_t op, int hi, int lo) {
 /* ======== Group 5 ======== */
 static void decode5(h8s_cpu_t *cpu, uint16_t op, int hi, int lo) {
     switch (hi) {
-        case 0x50: { /* MULXU.B */
+        case 0x50: { /* MULXU.B Rs, Rd: Rd = Rs x the low byte of Rd. Rd is a
+                      * word register (R0-R7, E0-E7), not a byte register
+                      * code: reading it as one took R0H for R0, which lost
+                      * every BCD tens digit CyOS converts (13:45 read 3:05) */
             int rs = (lo >> 4) & 0xF; int rd = lo & 0xF;
-            int result = get_reg_b(cpu, rs) * get_reg_b(cpu, rd);
+            int result = get_reg_b(cpu, rs) * (get_r(cpu, rd) & 0xFF);
             set_r(cpu, rd, (uint16_t)(result & 0xFFFF));
             break;
         }

@@ -12,6 +12,8 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 #include <algorithm>
 
 #include "tdeck_pins.h"
@@ -1288,6 +1290,81 @@ static uint8_t *inject_sd_apps(uint8_t *nvram, size_t *nvram_size) {
 }
 #endif
 
+/* The clock. The T-Deck has no battery clock: the ESP32's time of day
+ * (gettimeofday, local time as seconds since 1970) keeps running across
+ * software restarts, and after a power-off resumes from the last time saved
+ * in NVS. The Cybiko's clock chip starts from it, and the core puts CyOS's
+ * cold-boot clock reset back to it (rtc.c). Setting the time in CyOS sets
+ * it, and so does ReBiko Desktop's "TIME" message over LoRa. */
+#define CLOCK_VALID   978307200ul   // 2001-01-01: anything earlier was never set
+#define CLOCK_SAVE_MS (5ul * 60 * 1000)
+static uint32_t clock_saved_at;
+
+static void clock_set(time_t t) {
+    struct timeval tv = { t, 0 };
+    settimeofday(&tv, NULL);
+}
+
+static void clock_save(void) {
+    time_t now = time(NULL);
+    clock_saved_at = millis();
+    if ((unsigned long)now < CLOCK_VALID)
+        return;
+    Preferences p;
+    p.begin("rebiko_clk", false);
+    p.putULong("t", (uint32_t)now);
+    p.end();
+}
+
+static void clock_boot(void) {
+    if ((unsigned long)time(NULL) >= CLOCK_VALID) {
+        Serial.println("clock: kept across the restart");
+        return;
+    }
+    Preferences p;
+    p.begin("rebiko_clk", true);
+    uint32_t t = p.getULong("t", 0);
+    p.end();
+    if (t >= CLOCK_VALID) {
+        clock_set((time_t)t);
+        Serial.println("clock: resumed from the last time saved");
+    }
+}
+
+// CyOS's Settings set the time
+static void clock_from_guest(void) {
+    time_t now = time(NULL);
+    struct tm cur, tm;
+    gmtime_r(&now, &cur);
+    cybiko_rtc_get(emu, &tm, (unsigned long)now >= CLOCK_VALID ? cur.tm_year + 1900 : 2026);
+    clock_set(mktime(&tm));   // no TZ: mktime is UTC, like the stored time
+    clock_save();
+    Serial.printf("clock: set in CyOS to %04d-%02d-%02d %02d:%02d\n", tm.tm_year + 1900,
+                  tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+}
+
+// "TIME <seconds>" from ReBiko Desktop on the control channel
+static void clock_on_control(void *user, const uint8_t *data, size_t len, uint32_t sender) {
+    (void)user;
+    if (len < 6 || len > 24 || memcmp(data, "TIME ", 5) != 0)
+        return;
+    char num[24];
+    memcpy(num, data + 5, len - 5);
+    num[len - 5] = 0;
+    time_t t = (time_t)strtoul(num, NULL, 10);
+    time_t now = time(NULL);
+    if ((unsigned long)t < CLOCK_VALID ||
+        ((unsigned long)now >= CLOCK_VALID && llabs((long long)(t - now)) <= 2))
+        return;
+    clock_set(t);
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    if (emu)
+        cybiko_rtc_set(emu, &tm);
+    clock_save();
+    Serial.printf("clock: set over LoRa by %08X\n", (unsigned)sender);
+}
+
 /* Saves run in the background. The image is copied (a few ms), then
  * written to save.tmp SAVE_CHUNK bytes a frame, and save.tmp replaces the
  * save once every byte is on the card, so a cut-off write keeps the old
@@ -1788,6 +1865,7 @@ static void hook_restart(void *ctx, const rb_config_t *c) {
     g_cfg = *c;
     save_config();
     save_nvram(emu, true);
+    clock_save();
     Serial.println("restart from the menu");
     Serial.flush();
     delay(100);
@@ -1824,6 +1902,7 @@ static bool hook_switch_machine(void *ctx, const rb_config_t *c) {
     g_cfg = *c;
     save_config();
     save_nvram(emu, true);
+    clock_save();
     if (esp_ota_set_boot_partition(other) != ESP_OK) {
         Serial.printf("%s in %s did not verify\n", OTHER_MACHINE, other->label);
         return false;
@@ -2093,6 +2172,7 @@ void setup() {
     init_gray_lut();
 
     int radio_rc = cybiko_sx1262_begin(tdeck_bus_free);
+    cybiko_sx1262_on_control(clock_on_control, NULL);
     Serial.printf("SX1262 begin %d status=0x%02X errors=0x%04X %s\n",
                   radio_rc, cybiko_sx1262_chip_status(),
                   cybiko_sx1262_device_errors(), cybiko_sx1262_last_error());
@@ -2158,6 +2238,8 @@ void setup() {
         tft.drawString("and " SD_PATH("flash.bin"), 10, 50, 2);
         while (1) delay(1000);
     }
+
+    clock_boot();   // before the emulator: its clock chip starts from this
 
     // Create emulator
     cybiko_hal_t hal = {};
@@ -2601,6 +2683,10 @@ void loop() {
     }
 #endif
 
+    if (cybiko_rtc_take_written(emu))
+        clock_from_guest();
+    if (millis() - clock_saved_at >= CLOCK_SAVE_MS)
+        clock_save();
     save_step();
     pace_frame();
 }
