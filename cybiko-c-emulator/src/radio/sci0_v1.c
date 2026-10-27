@@ -51,8 +51,10 @@ void cybiko_sci0_bind(cybiko_sci0_v1_t *s, struct cybiko_radio_coproc *coproc,
     s->irq = irq;
     s->ctx = ctx;
     s->radio_id = radio_id;
-    if (coproc)
+    if (coproc) {
         cybiko_radio_coproc_set_v1(coproc, true);
+        cybiko_radio_coproc_set_classic(coproc, true);
+    }
 }
 
 static void sci0_raise_irq(cybiko_sci0_v1_t *s, int vector) {
@@ -124,6 +126,7 @@ bool cybiko_sci0_read(cybiko_sci0_v1_t *s, uint32_t address, uint8_t *out) {
 
 void cybiko_sci0_reset_mode(cybiko_sci0_v1_t *s) {
     s->dtc_mode = false;
+    s->pending_ack = false;
     s->pending_indicator = -1;
     if (s->coproc)
         cybiko_radio_coproc_set_v1(s->coproc, true);
@@ -169,10 +172,10 @@ static void sci0_dtc(cybiko_sci0_v1_t *s, uint8_t scr) {
         for (int i = 0; i < n; i++)
             buf[i] = s->read8(s->ctx, sar + (uint32_t)i);
         cybiko_radio_coproc_handle_transmit(s->coproc, buf, (size_t)n);
-        /* 9 bytes or fewer is an AVR command, not a frame */
-        if (count <= 9) {
-            s->pending_indicator = CYBIKO_RADIO_IND_SMALL;
-        } else {
+        /* 9 bytes or fewer is an AVR command, not a frame: the AVR says
+         * nothing to it. After a frame it says 0x03. */
+        if (count > CYBIKO_RADIO_HDR + 1) {
+            s->pending_ack = true;
             s->pending_indicator = cybiko_radio_coproc_complete_tx_dtc(s->coproc);
             s->tx_frames++;
             s->radio_up = true;
@@ -201,10 +204,12 @@ void cybiko_sci0_on_dtcer(cybiko_sci0_v1_t *s, uint8_t value) {
     if (value & (V1_DTCERE_RXI0 | V1_DTCERE_TXI0))
         sci0_dtc(s, s->scr);
     /* CyOS clears the TXI0 DTC bit once the frame is done; then come the
-     * co-processor's 0x03 and the frame indicator, as on the Xtreme */
-    if (s->pending_indicator >= 0 && !(value & V1_DTCERE_TXI0)) {
+     * co-processor's 0x03 and, if a frame is waiting, its frame start */
+    if (s->pending_ack && !(value & V1_DTCERE_TXI0)) {
         cybiko_radio_coproc_queue_response(s->coproc, CYBIKO_RADIO_ACK);
-        cybiko_radio_coproc_queue_response(s->coproc, (uint8_t)s->pending_indicator);
+        if (s->pending_indicator >= 0)
+            cybiko_radio_coproc_queue_response(s->coproc, (uint8_t)s->pending_indicator);
+        s->pending_ack = false;
         s->pending_indicator = -1;
     }
 }
@@ -252,7 +257,7 @@ static void sci0_async_delivery(cybiko_sci0_v1_t *s) {
     if (!obj || s->read8(s->ctx, obj + l->state_off) != 1)
         return;
     if (s->dtc_mode) {      /* the indicator only; the frame comes by DTC */
-        if (s->pending_indicator < 0 && cybiko_radio_coproc_try_async(s->coproc) >= 0)
+        if (!s->pending_ack && cybiko_radio_coproc_try_async(s->coproc) >= 0)
             s->rx_injected++;
         return;
     }

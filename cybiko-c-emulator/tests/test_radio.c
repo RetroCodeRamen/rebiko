@@ -109,10 +109,11 @@ static void test_beacon_and_chat_roundtrip(void) {
     TEST_CHECK(cybiko_radio_coproc_pending(&cpu[1]) == 2);
     const cybiko_radio_frame_t *b = cybiko_radio_coproc_peek(&cpu[1], 0);
     const cybiko_radio_frame_t *m = cybiko_radio_coproc_peek(&cpu[1], 1);
-    TEST_CHECK(b && b->len == 42 && b->data[1] == 0x01);
+    /* frames keep CyOS's address header: 8 bytes, then the payload */
+    TEST_CHECK(b && b->len == 50 && b->data[9] == 0x01);
     TEST_CHECK(b->sender_id == 0x10000001u);
-    TEST_CHECK(m && m->len == 192 && m->data[1] == 0x20);
-    TEST_CHECK(memcmp(m->data + 19, "hello", 5) == 0);
+    TEST_CHECK(m && m->len == 200 && m->data[9] == 0x20);
+    TEST_CHECK(memcmp(m->data + 8 + 19, "hello", 5) == 0);
 
     /* Poll must not consume the chat sitting behind... beacon is first and small.
      * Deliver the beacon, then hold the chat on a following poll. */
@@ -169,7 +170,7 @@ static void test_opaque_type_and_null_and_cap(void) {
     cybiko_radio_coproc_handle_transmit(&cpu[0], raw, n);
     radio_sim_bus_pump(&bus);
     const cybiko_radio_frame_t *f = cybiko_radio_coproc_peek(&cpu[1], 0);
-    TEST_CHECK(f && f->len == 60 && f->data[1] == 0x99);
+    TEST_CHECK(f && f->len == 68 && f->data[9] == 0x99);
 
     /* prepare without a ready flag must not eat the frame */
     cybiko_radio_coproc_prepare_rx(&cpu[1], 50);
@@ -190,7 +191,7 @@ static void test_opaque_type_and_null_and_cap(void) {
     TEST_CHECK(cybiko_radio_coproc_pending(&cpu[1]) == 4);
     /* oldest was the 60-byte frame, then beacon 0. Both gone. Head is beacon 1. */
     f = cybiko_radio_coproc_peek(&cpu[1], 0);
-    TEST_CHECK(f && f->len == 42 && f->data[2] == 1);
+    TEST_CHECK(f && f->len == 50 && f->data[10] == 1);
 }
 
 static void test_loss_dup_latency_peers(void) {
@@ -292,6 +293,53 @@ static void test_v2_beacon_uses_small_indicator(void) {
     TEST_CHECK(cybiko_radio_coproc_pending(&cpu[1]) == 1);
 }
 
+static void test_address_header_kept(void) {
+    setup_n(3, 255);
+    uint8_t payload[42], raw[64];
+    beacon(payload);
+    size_t n = wrap_xt(raw, 0x10000001u, payload, 42);
+    raw[0] = 0x10; raw[1] = 0x00; raw[2] = 0x00; raw[3] = 0x02;   /* to B only */
+    cybiko_radio_coproc_handle_transmit(&cpu[0], raw, n);
+    radio_sim_bus_pump(&bus);
+    /* the AVR filters nothing: C hears it too, still addressed to B */
+    for (int k = 1; k <= 2; k++) {
+        TEST_CHECK(cybiko_radio_coproc_try_async(&cpu[k]) == 0x32);
+        TEST_CHECK(cybiko_radio_coproc_read(&cpu[k]) == 0x32);
+        cybiko_radio_coproc_prepare_rx(&cpu[k], 50);
+        uint8_t got[50];
+        for (int i = 0; i < 50; i++)
+            got[i] = (uint8_t)cybiko_radio_coproc_read(&cpu[k]);
+        TEST_CHECK(memcmp(got, raw, 50) == 0);
+    }
+}
+
+static void test_classic_avr_replies(void) {
+    setup_n(2, 255);
+    cybiko_radio_coproc_set_classic(&cpu[0], true);
+    cybiko_radio_coproc_set_v1(&cpu[0], true);
+    /* no reply to an 01 command */
+    cybiko_radio_coproc_receive(&cpu[0], 0x01);
+    cybiko_radio_coproc_receive(&cpu[0], 0x02);
+    cybiko_radio_coproc_receive(&cpu[0], 0x04);
+    TEST_CHECK(cpu[0].current_channel == 4);
+    TEST_CHECK(cybiko_radio_coproc_rx_count(&cpu[0]) == 0);
+    /* a frame with nothing heard: 0x03 only, no empty frame after it */
+    cybiko_radio_coproc_receive(&cpu[0], 0x30);
+    cybiko_radio_coproc_receive(&cpu[0], 0x00);
+    cybiko_radio_coproc_v1_tx_complete(&cpu[0]);
+    TEST_CHECK(cybiko_radio_coproc_rx_count(&cpu[0]) == 1);
+    TEST_CHECK(cybiko_radio_coproc_read(&cpu[0]) == 0x03);
+    TEST_CHECK(cybiko_radio_coproc_complete_tx_dtc(&cpu[0]) == -1);
+    /* with a frame waiting, its start follows */
+    uint8_t payload[42], raw[64];
+    beacon(payload);
+    payload[0] = 0xC4;   /* channel 4, as tuned */
+    size_t n = wrap_xt(raw, 0x10000002u, payload, 42);
+    cybiko_radio_coproc_handle_transmit(&cpu[1], raw, n);
+    radio_sim_bus_pump(&bus);
+    TEST_CHECK(cybiko_radio_coproc_complete_tx_dtc(&cpu[0]) == 0x32);
+}
+
 TEST_LIST = {
     { "link self-check", test_self_check },
     { "channel command and short frame drop", test_channel_command_and_short_drop },
@@ -302,5 +350,7 @@ TEST_LIST = {
     { "async delivery and V1 null exchange", test_async_and_v1_paths },
     { "bad CRC is not delivered", test_bad_crc_injected },
     { "V2 beacon and init clears the UART queue", test_v2_beacon_uses_small_indicator },
+    { "the address header crosses unchanged", test_address_header_kept },
+    { "Classic AVR replies", test_classic_avr_replies },
     { NULL, NULL }
 };

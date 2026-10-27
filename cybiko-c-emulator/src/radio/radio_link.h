@@ -20,7 +20,9 @@ extern "C" {
 #endif
 
 #define CYBIKO_LINK_MAGIC        0xC7
-#define CYBIKO_LINK_VERSION      1
+/* 2: the guest payload keeps CyOS's 8-byte address header. A version 1
+ * peer is dropped, not misread. */
+#define CYBIKO_LINK_VERSION      2
 #define CYBIKO_LINK_HDR          16
 #define CYBIKO_LINK_MAX_PHYS     255
 #define CYBIKO_LINK_MAX_PAYLOAD  240

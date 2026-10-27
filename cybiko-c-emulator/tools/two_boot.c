@@ -776,8 +776,8 @@ int main(int argc, char **argv) {
                         }
                     }
                     printf("  q[%d] len=%u type=%02X ch=%02X marker=%d sender=%08X\n",
-                           i, f->len, f->len > 1 ? f->data[1] : 0,
-                           f->len > 0 ? f->data[0] : 0, has, f->sender_id);
+                           i, f->len, f->len > CYBIKO_RADIO_HDR + 1 ? f->data[CYBIKO_RADIO_HDR + 1] : 0,
+                           f->len > CYBIKO_RADIO_HDR ? f->data[CYBIKO_RADIO_HDR] : 0, has, f->sender_id);
                 }
                 last_pending_b = pb;
             }

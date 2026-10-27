@@ -101,6 +101,7 @@ void cybiko_radio_coproc_set_transport(cybiko_radio_coproc_t *c, cybiko_radio_tr
 
 void cybiko_radio_coproc_set_v1(cybiko_radio_coproc_t *c, bool v1) { c->v1_mode = v1; }
 void cybiko_radio_coproc_set_v2(cybiko_radio_coproc_t *c, bool v2) { c->v2_mode = v2; }
+void cybiko_radio_coproc_set_classic(cybiko_radio_coproc_t *c, bool classic) { c->classic = classic; }
 void cybiko_radio_coproc_set_v2_beacon(cybiko_radio_coproc_t *c,
                                       cybiko_radio_beacon_fn fn, void *user) {
     c->beacon_fn = fn;
@@ -126,21 +127,16 @@ static void send_payload(cybiko_radio_coproc_t *c, const uint8_t *payload, size_
 void cybiko_radio_coproc_handle_transmit(cybiko_radio_coproc_t *c,
                                         const uint8_t *data, size_t len) {
     if (!c || !data) return;
-    /* 8-byte RF header plus the XT trailing byte. Shorter buffers are
-     * AVR commands (for example 01 03 00 00) and must not hit the air. */
-    if (len <= 9) {
+    /* Address header plus the XT trailing byte. Shorter buffers are AVR
+     * commands (for example 01 03 00 00) and must not hit the air. */
+    if (len <= CYBIKO_RADIO_HDR + 1) {
         c->stat_tx_drop++;
         return;
     }
     size_t end = c->v1_mode ? len : len - 1;
-    if (end <= 8) {
-        c->stat_tx_drop++;
-        return;
-    }
-    size_t plen = end - 8;
-    if (plen > CYBIKO_RADIO_MAX_PAYLOAD) plen = CYBIKO_RADIO_MAX_PAYLOAD;
-    uint8_t channel = data[8] & 0x3F;
-    send_payload(c, data + 8, plen, channel);
+    if (end > CYBIKO_RADIO_MAX_PAYLOAD) end = CYBIKO_RADIO_MAX_PAYLOAD;
+    uint8_t channel = data[CYBIKO_RADIO_HDR] & 0x3F;
+    send_payload(c, data, end, channel);
 }
 
 void cybiko_radio_coproc_prepare_rx(cybiko_radio_coproc_t *c, int count) {
@@ -152,21 +148,13 @@ void cybiko_radio_coproc_prepare_rx(cybiko_radio_coproc_t *c, int count) {
     c->async_rx_pending = false;
 
     if (take && c->q_count > 0) {
+        /* the frame as it was sent, address header included */
         cybiko_radio_frame_t *f = peek_frame(c);
         pop_frame(c);
-        for (int i = 0; i < 4 && i < count; i++)
-            rxq_push(c, 0xFF);
-        if (count > 4) rxq_push(c, (uint8_t)(f->sender_id >> 24));
-        if (count > 5) rxq_push(c, (uint8_t)(f->sender_id >> 16));
-        if (count > 6) rxq_push(c, (uint8_t)(f->sender_id >> 8));
-        if (count > 7) rxq_push(c, (uint8_t)f->sender_id);
-        int payload_space = count - 8;
-        if (payload_space < 0) payload_space = 0;
-        int n = f->len;
-        if (n > payload_space) n = payload_space;
+        int n = f->len < count ? f->len : count;
         for (int i = 0; i < n; i++)
             rxq_push(c, f->data[i]);
-        for (int i = 8 + n; i < count; i++)
+        for (int i = n; i < count; i++)
             rxq_push(c, 0xFF);
     } else {
         for (int i = 0; i < count; i++)
@@ -178,8 +166,10 @@ int cybiko_radio_coproc_complete_tx_dtc(cybiko_radio_coproc_t *c) {
     c->v1_accum = false;
     c->rx_frame_ready = false;
     cybiko_radio_frame_t *next = peek_frame(c);
-    if (!next) return CYBIKO_RADIO_IND_SMALL;
-    if (c->last_command == CYBIKO_RADIO_CMD_POLL && next->len > 50)
+    bool held = next && c->last_command == CYBIKO_RADIO_CMD_POLL && next->len > 50;
+    if (c->classic && (!next || held))
+        return -1;   /* the AVR says only 0x03 */
+    if (!next || held)
         return CYBIKO_RADIO_IND_SMALL;
     c->rx_frame_ready = true;
     return (next->len > 50) ? CYBIKO_RADIO_IND_LARGE : CYBIKO_RADIO_IND_SMALL;
@@ -219,6 +209,8 @@ void cybiko_radio_coproc_v1_tx_complete(cybiko_radio_coproc_t *c) {
     c->rx_frame_ready = false;
     int indicator;
     cybiko_radio_frame_t *next = peek_frame(c);
+    if (c->classic && (!next || (c->last_command == CYBIKO_RADIO_CMD_POLL && next->len > 50)))
+        return;   /* the AVR says only 0x03 */
     if (!next) {
         indicator = CYBIKO_RADIO_IND_LARGE;
     } else if (c->last_command == CYBIKO_RADIO_CMD_POLL && next->len > 50) {
@@ -231,11 +223,11 @@ void cybiko_radio_coproc_v1_tx_complete(cybiko_radio_coproc_t *c) {
     cybiko_radio_coproc_prepare_rx(c, indicator == CYBIKO_RADIO_IND_LARGE ? 200 : 50);
 }
 
+/* The Classic's AVR answers no 01 command; the Java object acks each */
 static void process_command3(cybiko_radio_coproc_t *c, uint8_t cmd, uint8_t param) {
     switch (cmd) {
     case 0x04:
         rxq_clear(c);
-        rxq_push(c, CYBIKO_RADIO_ACK);
         c->initialized = true;
         break;
     case 0x02:
@@ -243,14 +235,13 @@ static void process_command3(cybiko_radio_coproc_t *c, uint8_t cmd, uint8_t para
         c->channel_set = true;
         if (c->transport && c->transport->set_channel)
             c->transport->set_channel(c->transport, param);
-        rxq_push(c, CYBIKO_RADIO_ACK);
         c->initialized = true;
         break;
-    case 0x03:
     default:
-        rxq_push(c, CYBIKO_RADIO_ACK);
         break;
     }
+    if (!c->classic)
+        rxq_push(c, CYBIKO_RADIO_ACK);
 }
 
 static void process_command2(cybiko_radio_coproc_t *c, uint8_t header) {

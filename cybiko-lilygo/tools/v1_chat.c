@@ -105,7 +105,8 @@ static int shim_send(cybiko_radio_transport_t *s, const uint8_t *data, size_t le
     for (size_t i = 0; i < n; i++)
         t[i] = data[i] >= 0x20 && data[i] < 0x7f ? (char)data[i] : '.';
     t[n] = 0;
-    printf("%6d %s air type=%02X len=%3zu |%s|\n", frame, o->name, len > 1 ? data[1] : 0, len, t);
+    printf("%6d %s air type=%02X len=%3zu |%s|\n", frame, o->name,
+           len > CYBIKO_RADIO_HDR + 1 ? data[CYBIKO_RADIO_HDR + 1] : 0, len, t);
     return o->real->send_packet(o->real, data, len, ch);
 }
 static int shim_start(cybiko_radio_transport_t *s) { return OWNER(s)->real->start(OWNER(s)->real); }

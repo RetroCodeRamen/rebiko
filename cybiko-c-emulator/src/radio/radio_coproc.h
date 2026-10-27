@@ -16,6 +16,16 @@
  *
  * A queued 0x03 is the local AVR accepting a command. It is not a
  * statement that another radio received the packet.
+ *
+ * A frame keeps its 8-byte address header on the air: the destination
+ * CyID (FF FF FF FF for everyone), then the sender's. The real AVR sends
+ * every byte as CyOS gave it and filters nothing, so CyOS on each
+ * receiver decides whether a frame is for it.
+ *
+ * The Classic's replies follow its AVR firmware (avr19c6.bin in CyOS
+ * 1.2.57's System.a): nothing for an 01 command, only 0x03 when a frame
+ * has gone out, and a 0x32/0xC8 frame start only when a frame arrives.
+ * The Xtreme's AVR firmware is not available; it keeps the Java replies.
  */
 
 #include "radio_transport.h"
@@ -34,6 +44,7 @@ extern "C" {
 #define CYBIKO_RADIO_IND_SMALL   0x32
 #define CYBIKO_RADIO_IND_LARGE   0xC8
 #define CYBIKO_RADIO_ACK         0x03
+#define CYBIKO_RADIO_HDR         8      /* destination CyID, sender CyID */
 
 typedef enum {
     CYBIKO_RADIO_CMD_NONE = 0,
@@ -53,6 +64,7 @@ typedef struct cybiko_radio_coproc {
     cybiko_radio_transport_t *transport;
     bool v1_mode;
     bool v2_mode;
+    bool classic;                /* replies as the Classic's AVR firmware */
     bool initialized;
     bool v1_accum;
     bool rx_frame_ready;
@@ -85,19 +97,22 @@ typedef struct cybiko_radio_coproc {
     uint32_t stat_overflow;
     uint32_t stat_off_channel;
     uint16_t last_tx_len;
-    uint8_t  last_tx[24];
+    uint8_t  last_tx[48];
 } cybiko_radio_coproc_t;
 
 void cybiko_radio_coproc_init(cybiko_radio_coproc_t *c);
 void cybiko_radio_coproc_set_transport(cybiko_radio_coproc_t *c, cybiko_radio_transport_t *t);
 void cybiko_radio_coproc_set_v1(cybiko_radio_coproc_t *c, bool v1);
 void cybiko_radio_coproc_set_v2(cybiko_radio_coproc_t *c, bool v2);
+void cybiko_radio_coproc_set_classic(cybiko_radio_coproc_t *c, bool classic);
 void cybiko_radio_coproc_set_v2_beacon(cybiko_radio_coproc_t *c,
                                       cybiko_radio_beacon_fn fn, void *user);
 
 void cybiko_radio_coproc_receive(cybiko_radio_coproc_t *c, uint8_t value);
 void cybiko_radio_coproc_handle_transmit(cybiko_radio_coproc_t *c,
                                         const uint8_t *data, size_t len);
+/* The frame-start indicator to follow 0x03, or -1 (Classic) when no
+ * frame is waiting */
 int  cybiko_radio_coproc_complete_tx_dtc(cybiko_radio_coproc_t *c);
 void cybiko_radio_coproc_prepare_rx(cybiko_radio_coproc_t *c, int count);
 int  cybiko_radio_coproc_try_async(cybiko_radio_coproc_t *c);

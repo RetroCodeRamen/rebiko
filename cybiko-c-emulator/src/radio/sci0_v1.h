@@ -67,7 +67,8 @@ typedef struct cybiko_sci0_v1 {
     uint32_t radio_id;      /* 0 = keep the ROM CyID */
     int layout;             /* CyOS version found in RAM, -1 = none yet */
     bool dtc_mode;          /* CyOS moves frames by DTC (1.2.57) */
-    int pending_indicator;  /* after a DTC frame: sent once TXI0's DTC bit clears */
+    bool pending_ack;       /* after a DTC frame: 0x03 once TXI0's DTC bit clears, */
+    int pending_indicator;  /* then this frame start, if not -1 */
     cybiko_sci0_read_fn read8;
     cybiko_sci0_poke_fn poke8;
     cybiko_sci0_irq_fn irq;

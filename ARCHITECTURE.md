@@ -65,7 +65,7 @@ CyOS
   → link codec                      fragment if the PHY needs it
   → radio_phy (SX1262, serial modem, or radio_sim)
   → peer transport
-  → peer co-processor prepare_rx    8-byte AVR header restored
+  → peer co-processor prepare_rx    frame as sent, padded to 50 or 200
   → SCI RX / DTC
   → peer CyOS
 ```
@@ -77,7 +77,7 @@ CyOS
 - `pump()` is how the host moves packets. The CPU frame loop must not sit inside an SPI transfer or a LoRa airtime wait.
 - `set_channel()` records the channel CyOS selected. The transport does not filter by channel; the co-processor does (below).
 
-Byte 0 of every guest payload is `0xC0 | channel`. CyOS tunes with co-processor command `0x02`, and from then on `radio_coproc.c` drops frames for any other channel. This mirrors a real radio, and it is what keeps Chat rooms apart:
+Byte 8 of every frame, the first after the address header, is `0xC0 | channel`. CyOS tunes with co-processor command `0x02`, and from then on `radio_coproc.c` drops frames for any other channel. This mirrors a real radio, and it is what keeps Chat rooms apart:
 
 | Channel | Used for |
 |---|---|
@@ -88,22 +88,19 @@ Byte 0 of every guest payload is `0xC0 | channel`. CyOS tunes with co-processor 
 
 CyOS retunes between these by itself as you move between screens.
 
-On transmit, the co-processor strips the 8-byte RF2915 preamble/CyID header. XT frames also drop the trailing status byte (51→42, 201→192). V1 frames have no trailing byte. Anything shorter than or equal to 9 bytes is an AVR command, not a packet, and is not transmitted.
-
-On receive, `prepare_rx` rebuilds the buffer CyOS expects:
+A frame goes on the air as CyOS wrote it, address header included (link version 2; a version 1 peer is dropped):
 
 | Offset | Bytes |
 |---|---|
-| 0–3 | destination `FF FF FF FF` (broadcast) |
-| 4–7 | sender CyID, big-endian, from the transport, not invented |
-| 8+ | guest payload |
-| pad | `FF` out to 50 or 200 bytes |
+| 0–3 | destination CyID, `FF FF FF FF` for everyone |
+| 4–7 | sender CyID, big-endian |
+| 8+ | channel byte, type, data |
 
-A null read is filled with `00`, not `FF`. An all-`FF` buffer passes CyOS's broadcast check and leaks connection objects.
+XT frames drop their trailing status byte (51→50, 201→200). V1 frames have none. Anything of 9 bytes or fewer is an AVR command, not a frame, and is not transmitted. On receive, `prepare_rx` hands CyOS the frame unchanged, padded with `FF` to 50 or 200 bytes. The real AVR filters nothing, so a frame addressed to one Cybiko reaches every Cybiko in range, and CyOS on each decides. A null read (Xtreme) is filled with `00`, not `FF`: an all-`FF` buffer passes CyOS's broadcast check and leaks connection objects.
 
-Local `03` bytes are UART acknowledgements from the emulated AVR. They are not a claim that a peer received the packet. The link layer does not emit its own ACK.
+Local `03` bytes come from the emulated AVR when a frame has gone out. They are not a claim that a peer received it. The link layer does not emit its own ACK.
 
-XT `complete_tx_dtc` returns `32` for a small queued frame or an empty queue, and `C8` for a large frame. Poll (`30`) will not dequeue a payload longer than 50 bytes; that frame waits for scan (`CF`).
+The Classic replies as its AVR firmware does (`avr19c6.bin`, in CyOS 1.2.57's `System.a`): nothing to an `01` command, `03` after a frame, and a `32`/`C8` frame start only when a received frame is waiting. `30` and `CF` start a small (50-byte) or large (200-byte) frame. Neither the firmware nor CyOS relays a frame; `tools/v1_three.sh` with `CHAIN=1` checks that. The Xtreme's AVR firmware is not available, so its replies stay as the Java emulator's: `03` to every command, and after a frame `32` for a small queued frame or an empty queue, `C8` for a large one. Poll (`30`) will not dequeue a frame longer than 50 bytes; that frame waits for scan (`CF`).
 
 The Java co-processor waits up to 15 ms inside `complete_tx_dtc`. That wait is not ported. A 192-byte chat payload plus the 16-byte link header is about 82 ms on the air at SF7/500 kHz/4/5; a 42-byte beacon is about 28 ms. Frames that arrive later are delivered by `try_async` when the guest radio is idle.
 

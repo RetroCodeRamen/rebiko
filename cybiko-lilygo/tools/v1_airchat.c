@@ -117,6 +117,9 @@ static void name_from_beacon(const uint8_t *d, size_t n, char *out, size_t cap) 
 }
 
 static void note_frame(const char *dir, uint32_t id, const uint8_t *d, size_t n) {
+    if (n <= CYBIKO_RADIO_HDR) return;
+    d += CYBIKO_RADIO_HDR;   /* past the address header */
+    n -= CYBIKO_RADIO_HDR;
     uint8_t type = n > 1 ? d[1] : 0;
     char nick[12];
     name_from_beacon(d, n, nick, sizeof nick);
