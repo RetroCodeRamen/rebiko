@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="img/CybikoIcon.png" alt="ReBiko" width="160">
-</p>
-
-<h1 align="center">ReBiko</h1>
+<h1 align="center">
+  <img src="img/rebiko-logo.png" alt="ReBiko" width="520">
+</h1>
 
 <p align="center"><em>Original CyOS. New hardware. Back on the air.</em></p>
 
