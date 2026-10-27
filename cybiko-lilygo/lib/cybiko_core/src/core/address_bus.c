@@ -840,6 +840,16 @@ static void write_on_chip8(address_bus_t *bus, uint32_t address, uint8_t value)
         return;
     }
 
+#if CYBIKO_HAS_SPI_FLASH
+    /* DTCERE: CyOS 1.2.57 runs its radio (SCI0) by DTC. Stored first, as
+     * DTCERF above; SCI1's flash DTC reads its own bit from memory. */
+    if (address == CYBIKO_SCI0_DTCERE && bus->sci0.bound) {
+        memory_write8(&bus->on_chip_ram, on_chip_offset(address), value);
+        cybiko_sci0_on_dtcer(&bus->sci0, value);
+        return;
+    }
+#endif
+
     /* Default: write to on-chip RAM */
     memory_write8(&bus->on_chip_ram, on_chip_offset(address), value);
 }

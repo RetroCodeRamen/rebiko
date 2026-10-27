@@ -227,6 +227,7 @@ void cybiko_reboot(cybiko_emu_t *emu) {
         emu->bus.sci0.radio_up = false;
         emu->bus.sci0.tx_frames = 0;
         emu->bus.sci0.rx_injected = 0;
+        cybiko_sci0_reset_mode(&emu->bus.sci0);
     }
     if (emu->bus.uart.bound) {
         emu->bus.uart.scr = 0;

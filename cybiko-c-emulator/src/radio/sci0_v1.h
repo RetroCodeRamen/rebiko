@@ -19,8 +19,16 @@
  * echoed messages. With TMR1 fixed, only two things are left here:
  *  - async RX: the co-processor hands CyOS a received frame while its
  *    radio is idle (state 1), as the AVR does;
- *  - identity: the CyID cache at 0x21F9DC is set to radio_id, because
- *    both ends usually boot the same flash.bin.
+ *  - identity: the CyID cache (0x21F9DC in 1.2.46) is set to radio_id,
+ *    because both ends usually boot the same flash.bin.
+ * Both use CyOS addresses; sci0_v1.c has them for 1.2.46 and 1.2.57.
+ *
+ * CyOS 1.2.57 (Cybiko's System Pack) drives the radio the Xtreme's way:
+ * frames go out and come in by DTC (DTCERE bits 2 and 3, register blocks
+ * at 0xFFFBC4 and 0xFFFBB8), and after a sent frame the co-processor's
+ * 0x03 and frame indicator follow CyOS clearing the TXI0 DTC bit. The
+ * first DTC transfer switches this file to that behaviour (sci2_xt.c's)
+ * until the next reboot.
  */
 
 #include "radio_coproc.h"
@@ -38,6 +46,7 @@ extern "C" {
 #define CYBIKO_SCI0_SSR 0xFFFF7Cu
 #define CYBIKO_SCI0_RDR 0xFFFF7Du
 
+#define CYBIKO_SCI0_DTCERE 0xFFFF34u
 #define CYBIKO_SCI0_RXI_VECTOR 81
 #define CYBIKO_SCI0_TXI_VECTOR 82
 
@@ -56,6 +65,9 @@ typedef struct cybiko_sci0_v1 {
     int async_countdown;    /* cycles until the next async check */
     bool radio_up;          /* CyOS has finished its first frame */
     uint32_t radio_id;      /* 0 = keep the ROM CyID */
+    int layout;             /* CyOS version found in RAM, -1 = none yet */
+    bool dtc_mode;          /* CyOS moves frames by DTC (1.2.57) */
+    int pending_indicator;  /* after a DTC frame: sent once TXI0's DTC bit clears */
     cybiko_sci0_read_fn read8;
     cybiko_sci0_poke_fn poke8;
     cybiko_sci0_irq_fn irq;
@@ -78,6 +90,10 @@ void cybiko_sci0_on_reg(cybiko_sci0_v1_t *s, int reg, uint8_t value);
 void cybiko_sci0_advance(cybiko_sci0_v1_t *s, int cycles);
 /* Once per frame: keeps the CyID set. */
 void cybiko_sci0_frame(cybiko_sci0_v1_t *s);
+/* Guest write to DTCERE (stored first). */
+void cybiko_sci0_on_dtcer(cybiko_sci0_v1_t *s, uint8_t value);
+/* Back to 1.2.46's byte-by-byte radio, for a reboot. */
+void cybiko_sci0_reset_mode(cybiko_sci0_v1_t *s);
 
 #ifdef __cplusplus
 }
