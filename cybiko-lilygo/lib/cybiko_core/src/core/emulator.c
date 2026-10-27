@@ -188,7 +188,7 @@ bool cybiko_load_flash_rom(cybiko_emu_t *emu, const uint8_t *data, size_t len) {
     if (len > AT45_SIZE) len = AT45_SIZE;
     memcpy(emu->spi_flash, data, len);
     if (len < AT45_SIZE)
-        at45_format_free(emu->spi_flash, (int)(len / AT45_PAGE_SIZE));
+        at45_format_free(emu->spi_flash, (int)((len + AT45_PAGE_SIZE - 1) / AT45_PAGE_SIZE));
     bus_load_spi_flash(&emu->bus, emu->spi_flash);
 #else
     memory_load(&emu->bus.flash_rom, data, len, 0);

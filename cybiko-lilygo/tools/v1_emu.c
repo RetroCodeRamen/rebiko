@@ -51,6 +51,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -3117,6 +3118,10 @@ static void radio_report(const cybiko_emu_t *emu, const cybiko_lora_t *lt,
 }
 
 int main(int argc, char **argv) {
+#ifndef _WIN32
+    /* a PC tool that quits mid-reply must not take the Desktop with it */
+    signal(SIGPIPE, SIG_IGN);
+#endif
     if (argc >= 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
         fprintf(stdout, "ReBiko Desktop %s\n", CYBIKO_EMU_VERSION);
         return 0;

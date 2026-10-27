@@ -90,7 +90,8 @@ class Link:
     def ls(self):
         files = []
         self.command("ls")
-        r = self.done(lambda l: files.append((l.split()[1], int(l.split()[2])))
+        # "FILE name size": a name may hold spaces
+        r = self.done(lambda l: files.append((l[5:].rsplit(" ", 1)[0], int(l.rsplit(" ", 1)[1])))
                       if l.startswith("FILE ") else None)
         return files, int(r.split()[-1])
 

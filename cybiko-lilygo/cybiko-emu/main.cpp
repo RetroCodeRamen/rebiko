@@ -724,6 +724,7 @@ static void keyboard_task(void *arg) {
 static rb_con_t apps_con;
 static rb_link_t apps_link;
 static bool link_line;
+static uint32_t link_line_at;   // a line not ended within 2 s is dropped
 
 static void apps_tx(void *user, uint8_t byte) {
     (void)user;
@@ -762,12 +763,15 @@ static void apps_setup(cybiko_emu_t *e) {
 
 // True when the byte belongs to the link, not the keyboard
 static bool apps_serial_byte(int c) {
+    if (link_line && millis() - link_line_at > 2000)
+        link_line = false;
     if (!link_line && !rb_link_receiving(&apps_link) && c != RB_LINK_START)
         return false;
     uint8_t b = (uint8_t)c;
-    if (c == RB_LINK_START)
+    if (c == RB_LINK_START) {
         link_line = true;
-    else if (link_line && c == '\n')
+        link_line_at = millis();
+    } else if (link_line && c == '\n')
         link_line = false;
     rb_link_rx(&apps_link, &b, 1);
     return true;

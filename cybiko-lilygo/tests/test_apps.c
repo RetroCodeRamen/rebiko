@@ -79,13 +79,28 @@ typedef struct {
     uint8_t file[4096];
     int bad_sums, bad_crc_once;
     char last_line[100];
+    int slow;               /* hold what CyOS says until cyos_catch_up */
+    char later[512];
+    int later_n;
 } cyos_t;
 
 static void cyos_say(cyos_t *o, const char *s) {
+    if (o->slow) {
+        while (*s && o->later_n < (int)sizeof o->later - 1)
+            o->later[o->later_n++] = *s++;
+        return;
+    }
     for (; *s; s++) {
         if (*s == '\n') rb_con_rx(o->con, '\r');
         rb_con_rx(o->con, (uint8_t)*s);
     }
+}
+
+static void cyos_catch_up(cyos_t *o) {
+    o->later[o->later_n] = 0;
+    o->slow = 0;
+    o->later_n = 0;
+    cyos_say(o, o->later);
 }
 
 static void cyos_ask_block(cyos_t *o) {
@@ -217,6 +232,21 @@ static void test_console(void) {
     CHECK(strcmp(os.last_line, "rcv game.app 1100") == 0);
     CHECK(os.got == 1100 && memcmp(os.file, app, 1100) == 0);
     CHECK(con.blocks_sent == 3);
+
+    /* The next put, with CyOS slow to answer after its 0x02: the last
+     * put's "receive successfull" must not end this one. The name holds
+     * "send", which must not pass for a block request. */
+    static uint8_t two[600];
+    for (int i = 0; i < 600; i++) two[i] = (uint8_t)(i * 7);
+    os.slow = 1;
+    CHECK(rb_con_send_file(&con, "sender.app", two, sizeof two));
+    run(&con, 3);
+    CHECK(con.state == RB_CON_BUSY);
+    cyos_catch_up(&os);
+    run(&con, 200);
+    CHECK(con.state == RB_CON_DONE);
+    CHECK(strcmp(os.name, "sender.app") == 0);
+    CHECK(os.got == 600 && memcmp(os.file, two, 600) == 0);
 
     /* CyOS refuses: the console reports it */
     CHECK(rb_con_send_file(&con, "\"q.app\"", app, 10));

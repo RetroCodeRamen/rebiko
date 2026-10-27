@@ -154,6 +154,7 @@ static bool con_start(rb_con_t *c, int op, const char *line) {
     c->tries = 0;
     c->idle_ms = 0;
     c->rx_n = 0;
+    c->rx[0] = 0;       /* or the last command's "receive successfull" ends this one */
     c->result[0] = 0;
     c->blocks_sent = 0;
     snprintf(c->line, sizeof c->line, "%s", line);
@@ -182,6 +183,7 @@ void rb_con_rx(rb_con_t *c, uint8_t byte) {
         if (byte == 0x02) {
             c->step = STEP_RUN;
             c->rx_n = 0;
+            c->rx[0] = 0;
         } else {
             c->step = STEP_SEND;     /* bad sum: send it again */
         }
@@ -195,6 +197,15 @@ void rb_con_rx(rb_con_t *c, uint8_t byte) {
     }
     c->rx[c->rx_n++] = (char)byte;
     c->rx[c->rx_n] = 0;
+}
+
+/* CyOS's request for block N: "sendN" at the start of a line. The echo
+ * ">> rcv sender.app ..." must not pass for one. */
+static char *find_send(char *rx) {
+    for (char *m = strstr(rx, "send"); m; m = strstr(m + 1, "send"))
+        if ((m == rx || m[-1] == '\n') && m[4] >= '0' && m[4] <= '9')
+            return m;
+    return NULL;
 }
 
 /* Drop what CyOS said up to and including the end of s */
@@ -254,7 +265,7 @@ void rb_con_poll(rb_con_t *c, uint32_t elapsed_ms) {
 
     char *m;
     if (c->step == STEP_RUN && c->op == RB_CON_OP_PUT) {
-        while ((m = strstr(c->rx, "send")) != NULL) {
+        while ((m = find_send(c->rx)) != NULL) {
             char *nl = strchr(m, '\n');
             if (!nl)
                 break;
@@ -408,6 +419,7 @@ static void link_command(rb_link_t *l, char *line) {
             if (!name_ok(arg)) { link_say(l, "ERR bad name"); return; }
             snprintf(c, sizeof c, "rm -f \"%s\"", arg);
         } else if (line[0] == 'c') {
+            if (strlen(arg) >= sizeof l->con->line) { link_say(l, "ERR command too long"); return; }
             snprintf(c, sizeof c, "%s", arg);
         } else {
             snprintf(c, sizeof c, "reboot");
@@ -446,7 +458,8 @@ void rb_link_rx(rb_link_t *l, const uint8_t *data, size_t n) {
         if (l->waiting == WAIT_CON)
             continue;       /* one thing at a time */
         char ch = (char)data[i];
-        if (ch == '\r' || ch == RB_LINK_START) continue;
+        if (ch == RB_LINK_START) { l->cmd_n = 0; continue; }   /* a new command */
+        if (ch == '\r') continue;
         if (ch == '\n') {
             l->cmd[l->cmd_n] = 0;
             l->cmd_n = 0;
