@@ -12,7 +12,9 @@
  * PORT is /dev/ttyUSB0 on Linux or COMn on Windows. If omitted, Settings
  * and the radio attach the first Heltec CP2102 (10c4:ea60) found.
  * Build with tools/v1_emu.sh (Linux) or tools/v1_emu.bat (Windows). */
-#define CYBIKO_EMU_VERSION "1.1026.4b"
+#ifndef CYBIKO_EMU_VERSION   /* tools/v1_emu.sh passes the repository's VERSION */
+#define CYBIKO_EMU_VERSION "1.1027.1b"
+#endif
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>

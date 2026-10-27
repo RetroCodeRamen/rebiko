@@ -14,6 +14,7 @@ mkdir -p "$(dirname "$OUT")"
 for M in XT V1; do
 if [ $M = V1 ]; then BIN=$OUT; ST=${STRIDE:-12}; else BIN=$(dirname "$OUT")/xt_emu; ST=${XT_STRIDE:-20}; fi
 gcc -std=c11 -D_DEFAULT_SOURCE -DEMU_TIMER_STRIDE=$ST -DCYBIKO_MACHINE_$M -O2 -Wall -Wextra \
+    -DCYBIKO_EMU_VERSION="\"$(tr -d ' \n' < "$HERE/../VERSION")\"" \
     -I"$CORE" -I"$CORE/core" -I"$RADIO" -I"$HERE/tools" \
     $(pkg-config --cflags sdl2 libpng x11 xext) \
     -I"$HERE/cybiko-emu" \
