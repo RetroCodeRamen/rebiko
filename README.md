@@ -194,23 +194,53 @@ The guest is unmodified CyOS. This is not a Cybiko-style rewrite. Design notes l
 
 ---
 
-## Status
+## Current status
 
-Honest snapshot, 27 Oct 2026.
+Honest snapshot, 27 Oct 2026, release [v1.1027.1b](https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1027.1b).
 
-| Have today | Still cooking |
-| --- | --- |
-| ReBiko Desktop on Linux and Windows | One-click flash pack with no PlatformIO |
-| Heltec auto-detect + ReBiko Radio OLED | Apps on the Xtreme |
-| ReBiko Pocket (T-Deck Classic firmware) | XT battery on Port A |
-| PC ↔ T-Deck Chat over LoRa, rooms kept apart | Native Windows click-through window shape |
-| T-Deck volume 0–10, settings saved 10 s after a change | Longest range with no lost messages (22 dBm, link view) |
-| ReBiko Pocket menu (`$` Mic): key remapping, CPU mode, display, audio | |
-| Apps on and off a running Classic, from the Desktop's Apps window or `rebiko_apps.py` | |
-| CyOS 1.2.57 and full Cylandia (`rebiko_cyos_update.py`) | |
-| | Private messages, the people list and multiplayer games over the air |
+### Working today
 
-Chat over the air works now. The bench test is the PC on a Heltec and a T-Deck in Chat MAIN, 3 lines each way, and it passes 6/6. v1.1026.3b is the first download with it; Chat in v1.1026.2b and earlier doesn't work.
+**On the air**
+- CyOS Chat over LoRa between ReBiko Desktop (with a Heltec) and ReBiko Pocket (a T-Deck), both ways. Each Chat room is its own radio channel, as on the real Cybiko, so rooms stay apart.
+- The radio follows the Classic's own co-processor firmware (`avr19c6.bin`, read out of Cybiko's update files): frames keep who they are addressed to, and the replies match the real chip.
+- 915 MHz, SF7, 500 kHz, 22 dBm with listen-before-talk. A link readout on the T-Deck (menu > System) shows messages heard and lost, RSSI and SNR.
+
+**The Cybiko itself**
+- The original CyOS 1.2.46, and CyOS 1.2.57 (Cybiko's last Classic System Pack) via `tools/rebiko_cyos_update.py`. Full Cylandia runs under 1.2.57.
+- Apps on and off a running Classic with nothing restarted: the Desktop's **Apps** window (your `Apps/` library beside the Cybiko's files), or `rebiko_apps.py` / `rebiko-apps` over USB or to the Desktop.
+- A flash chip twice the real Classic's size (1 MB): about 560 KB free instead of 43 KB.
+- A clock that keeps time (below).
+
+**ReBiko Desktop**
+- Linux (a `.deb` that installs into your launcher, or a zip) and Windows (v1.1026.4b).
+- A photo-real Classic or Xtreme shell; switch between them in Settings. The Heltec is found by itself.
+
+**ReBiko Pocket (T-Deck)**
+- Classic and Xtreme on one T-Deck, switched from the menu.
+- `$` Mic menu: remap any key, CPU mode, brightness, scale, volume, battery-saving backlight.
+- Keyboard: Sym gives digits and symbols as printed on the keys, including the Classic's `! @ # % ^ & * ( ) _ + : " ? < > { } |`.
+- Saves land on the SD card within seconds of CyOS writing them, without freezing (only the changed flash pages are written).
+- 60 fps on the desktop and in most apps.
+
+### Issues we hit, and how they are handled now
+
+- **The clock.** A real Cybiko kept its clock running on battery even when "off". ReBiko starts CyOS fresh every time, and CyOS resets its clock to 12:00 AM, 1 January at every fresh start. ReBiko now puts the time back straight after. The T-Deck has no battery-backed clock either, so it keeps the time across restarts, and after a power-off resumes from the last time it saved (it saves every 5 minutes and whenever the time is set). It gets the right time when you set it in CyOS's Settings, or from ReBiko Desktop, which sends its clock over LoRa every 30 s to any T-Deck in range. Chasing this found an emulator CPU bug (`MULXU.B` multiplied the wrong byte) that had been garbling every BCD number in CyOS and its apps; it is fixed.
+- **Stale patches on the T-Deck screen.** Large screen updates sometimes didn't fully reach the panel (white bars on the boot logo, half an old screen). Panel transfers are now finished before the panel is released, and a slow background refresh repaints the whole screen every few seconds, so anything missed heals by itself. The root cause of the occasional lost transfer is not known yet.
+- **Cylandia runs at 54–58 fps on the T-Deck.** That is the emulator, not the drawing: CyOS alone needs 90–97% of the T-Deck's time in Cylandia. A faster core is on the list.
+- **USB input on the T-Deck can stop** if a PC tool opens and closes the port repeatedly while it is booting. It keeps running; a reset or replug brings USB input back.
+- **The Windows download is still v1.1026.4b**, which uses the older radio link and won't talk to v1.1027.1b units.
+
+### Up next
+
+1. Private messages and the people list over the air, then multiplayer games.
+2. Classic ↔ Xtreme chat.
+3. A Windows build of v1.1027.1b.
+4. Two T-Decks in the same room (needs a second T-Deck).
+5. A faster emulator core for heavy apps like Cylandia.
+6. Time from WiFi for T-Decks away from the Desktop; radio settings in the Pocket menu; longer range (SF8/SF9).
+7. Apps on the Xtreme; the Xtreme battery reading.
+
+One thing we checked and ruled out: the Cybiko never relayed messages from one unit to another. Neither the shipped CyOS nor its radio co-processor forwards anything (`tools/v1_three.sh` with `CHAIN=1` shows it), so reaching past radio range will come from ReBiko itself, through the planned internet relay.
 
 ---
 
