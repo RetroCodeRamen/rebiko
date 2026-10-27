@@ -225,6 +225,7 @@ static void render_frame_body(const uint8_t *pixels, int w, int h) {
             dst[i] = gray_lut[src[i]];
         tft.startWrite();
         tft.pushImageDMA((SCALED_W - w) / 2, BORDER_TOP + (SCALED_H - h) / 2 + y0, w, rows, dst);
+        tft.dmaWait();
         tft.endWrite();
         return;
     }
@@ -242,8 +243,13 @@ static void render_frame_body(const uint8_t *pixels, int w, int h) {
             dst_row1[x * 2 + 1] = c;
         }
     }
+    /* endWrite raises the panel's chip select, which TFT_eSPI drives by
+     * hand; doing that before the DMA has finished dropped the end of a
+     * large update, and since shown_frame already holds those rows they
+     * stayed stale (white bars on the boot logo, half a Chat screen). */
     tft.startWrite();
     tft.pushImageDMA(0, BORDER_TOP + y0 * 2, SCALED_W, rows * 2, disp_buf + y0 * 2 * SCALED_W);
+    tft.dmaWait();
     tft.endWrite();
 }
 
