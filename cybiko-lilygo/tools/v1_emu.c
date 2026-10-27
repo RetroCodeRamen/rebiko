@@ -1,15 +1,25 @@
-/* SDL Classic with optional Heltec LoRa.
+/* ReBiko Desktop: the Cybiko Classic, or built with CYBIKO_MACHINE_XT the
+ * Xtreme (xt_emu), with optional Heltec LoRa.
  *   v1_emu boot.bin flash.bin [--nvram save.flash] [--radio PORT]
- *         [--cyid HEX] [--shell img/cybiko.png]
+ *         [--cyid HEX] [--shell img/cybiko.png] [--serial pty|LINK]
+ *         [--serial-log FILE]
+ * --serial (Linux, Classic) puts the Cybiko's serial port, where CyberLoad
+ * talked to CyOS, on a pseudo-terminal: "pty" prints its path, LINK also
+ * makes a symlink to it (for Wine: ~/.wine/dosdevices/com9). --serial-log
+ * records both directions in hex.
+ * --link PORT|off: the Classic takes app commands (tools/rebiko_apps.py)
+ * on 127.0.0.1:PORT, 47960 by default.
  * PORT is /dev/ttyUSB0 on Linux or COMn on Windows. If omitted, Settings
  * and the radio attach the first Heltec CP2102 (10c4:ea60) found.
  * Build with tools/v1_emu.sh (Linux) or tools/v1_emu.bat (Windows). */
 #define CYBIKO_EMU_VERSION "1.1026.4b"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
 #include <windows.h>
 #include <direct.h>
 #include <io.h>
+#include <process.h>
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -22,13 +32,22 @@
 #define access _access
 #define mkdir(p, m) _mkdir(p)
 #define popen _popen
+#define strcasecmp _stricmp
 #define pclose _pclose
 #else
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <termios.h>
 #include <unistd.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/shape.h>
 #endif
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
@@ -47,23 +66,53 @@
 #include "radio_coproc.h"
 #include "radio_lora.h"
 #include "radio_serial_phy.h"
+#include "rebiko_apps.h"
 
 #define MAX_HELD 16
-/* CyOS 1.2.46 misses a key held under 10 frames now and then (v1_chat) */
+/* CyOS 1.2.46 misses a key held under 10 frames now and then (v1_chat);
+ * the Xtreme at the T-Deck's stride missed 6 */
 #define MIN_HOLD 12
 
+/* One source, two builds: the Classic (CYBIKO_MACHINE_V1, v1_emu) and the
+ * Xtreme (xt_emu). Settings > Machine restarts into the other one. */
+#ifdef CYBIKO_MACHINE_V1
+#define MACHINE_NAME   "Classic"
+#define OTHER_MACHINE  "Xtreme"
+#define SHELL_FILE     "cybiko.png"
+#define OTHER_BIN      "xt_emu"
+#define OTHER_BOOT     "cyrom150.bin"
+#define OTHER_FLASH    "cyos_v1508.bin"
+#define OTHER_SAVE     "pc-xtreme.nvram"
 /* img/cybiko.png (887x1774). Interior screen hole is ~189,638 509x308;
  * pad a few pixels under the bezel so scale rounding never leaves a rim. */
 #define SHELL_SCREEN_X 186
 #define SHELL_SCREEN_Y 635
 #define SHELL_SCREEN_W 515
 #define SHELL_SCREEN_H 314
+#else
+#define MACHINE_NAME   "Xtreme"
+#define OTHER_MACHINE  "Classic"
+#define SHELL_FILE     "xtremeShell.png"
+#define OTHER_BIN      "v1_emu"
+#define OTHER_BOOT     "cyrom112.bin"
+#define OTHER_FLASH    "flash_v1246.bin"
+#define OTHER_SAVE     "pc-classic.flash"
+/* img/xtremeShell.png (898x1751). Transparent screen hole 157,608 502x307 */
+#define SHELL_SCREEN_X 154
+#define SHELL_SCREEN_Y 605
+#define SHELL_SCREEN_W 508
+#define SHELL_SCREEN_H 313
+#endif
 
+#ifdef CYBIKO_MACHINE_V1
+#define MENU_N 6
+#else
 #define MENU_N 5
+#endif
 #define MENU_W 168
 #define MENU_ROW 28
 #define SETTINGS_W 420
-#define SETTINGS_H 490
+#define SETTINGS_H 550
 #define ABOUT_W 440
 #define ABOUT_H 490
 #define STATUS_W 440
@@ -149,6 +198,15 @@ typedef struct {
     bool *running;
     bool dragging;
     int drag_off_x, drag_off_y;
+    /* Fn + letter keys: Fn goes down, the letter FN_LEAD frames later */
+    struct { int col; uint16_t mask; int delay; bool up; bool active; } fn_key[4];
+    /* Settings > Machine */
+    const char *boot_path, *nvram_path, *radio_arg;
+    uint32_t cyid;
+    char machine_pref[16];     /* "Classic" or "Xtreme": which one starts */
+    bool switch_machine;
+    char switch_cmd[3][4096];  /* other binary, its boot ROM and flash */
+    char switch_save[4096];
 } sdl_ctx_t;
 
 typedef struct { SDL_Scancode sc; int col; uint16_t mask; } keymap_t;
@@ -156,12 +214,16 @@ typedef struct { SDL_Scancode sc; int col; uint16_t mask; } keymap_t;
 /* r > 0: circle at (x,y). r == 0: inclusive rect (x,y)-(x1,y1). */
 typedef struct {
     int16_t x, y, r, x1, y1;
-    uint8_t col, mask;
+    uint8_t col;
+    uint16_t mask;
 } shell_hit_t;
 
+#ifdef CYBIKO_MACHINE_V1
+#define FN_COL  1
+#define FN_MASK 0x80
 static const keymap_t KEYS[] = {
     { SDL_SCANCODE_F7, 0, 0x01 }, { SDL_SCANCODE_ESCAPE, 0, 0x02 },
-    { SDL_SCANCODE_BACKSPACE, 0, 0x04 }, { SDL_SCANCODE_DELETE, 0, 0x04 },
+    { SDL_SCANCODE_DELETE, 0, 0x04 },
     { SDL_SCANCODE_LEFT, 0, 0x08 }, { SDL_SCANCODE_Q, 0, 0x10 },
     { SDL_SCANCODE_A, 0, 0x20 }, { SDL_SCANCODE_GRAVE, 0, 0x40 },
     { SDL_SCANCODE_LSHIFT, 0, 0x80 }, { SDL_SCANCODE_RSHIFT, 0, 0x80 },
@@ -187,7 +249,8 @@ static const keymap_t KEYS[] = {
     { SDL_SCANCODE_Y, 5, 0x10 }, { SDL_SCANCODE_H, 5, 0x20 },
     { SDL_SCANCODE_B, 5, 0x40 }, { SDL_SCANCODE_BACKSLASH, 5, 0x80 },
     { SDL_SCANCODE_F1, 6, 0x01 }, { SDL_SCANCODE_SLASH, 6, 0x02 },
-    { SDL_SCANCODE_7, 6, 0x08 }, { SDL_SCANCODE_U, 6, 0x10 },
+    /* BkSp erases before the cursor; Del (A.0) deletes forward */
+    { SDL_SCANCODE_BACKSPACE, 6, 0x04 }, { SDL_SCANCODE_7, 6, 0x08 }, { SDL_SCANCODE_U, 6, 0x10 },
     { SDL_SCANCODE_J, 6, 0x20 }, { SDL_SCANCODE_N, 6, 0x40 },
     { SDL_SCANCODE_MINUS, 7, 0x01 }, { SDL_SCANCODE_PERIOD, 7, 0x02 },
     { SDL_SCANCODE_0, 7, 0x04 }, { SDL_SCANCODE_8, 7, 0x08 },
@@ -274,6 +337,101 @@ static const shell_hit_t SHELL_HITS[] = {
     { 668, 1647, 0, 691, 1680, 7, 0x02 },
     { 718, 1644, 0, 748, 1683, 0, 0x80 },
 };
+#else
+/* The Xtreme matrix (Java emulator docs/research/xt-keyboard.md). It has
+ * no number row: digits and most symbols are Fn + a letter. */
+#define FN_COL  7
+#define FN_MASK 0x8000
+static const keymap_t KEYS[] = {
+    { SDL_SCANCODE_F1, 6, 0x0001 }, { SDL_SCANCODE_F2, 5, 0x0001 },
+    { SDL_SCANCODE_F3, 4, 0x0001 }, { SDL_SCANCODE_F4, 3, 0x0001 },
+    { SDL_SCANCODE_F5, 2, 0x0001 }, { SDL_SCANCODE_F6, 1, 0x0001 },
+    { SDL_SCANCODE_F7, 0, 0x0001 },
+    { SDL_SCANCODE_UP, 6, 0x0800 }, { SDL_SCANCODE_RIGHT, 6, 0x1000 },
+    { SDL_SCANCODE_DOWN, 6, 0x2000 }, { SDL_SCANCODE_LEFT, 6, 0x4000 },
+    { SDL_SCANCODE_RETURN, 4, 0x0008 }, { SDL_SCANCODE_KP_ENTER, 4, 0x0008 },
+    { SDL_SCANCODE_HOME, 4, 0x0010 },                    /* Select */
+    { SDL_SCANCODE_APPLICATION, 4, 0x0020 }, { SDL_SCANCODE_F8, 4, 0x0020 }, /* Menu */
+    { SDL_SCANCODE_SPACE, 4, 0x0040 },
+    { SDL_SCANCODE_TAB, 5, 0x0080 },
+    { SDL_SCANCODE_BACKSPACE, 5, 0x0100 }, { SDL_SCANCODE_DELETE, 5, 0x0100 },
+    { SDL_SCANCODE_INSERT, 5, 0x0200 }, { SDL_SCANCODE_ESCAPE, 5, 0x0400 },
+    { SDL_SCANCODE_LCTRL, 7, 0x8000 }, { SDL_SCANCODE_RCTRL, 7, 0x8000 },  /* Fn */
+    { SDL_SCANCODE_LSHIFT, 8, 0x8000 }, { SDL_SCANCODE_RSHIFT, 8, 0x8000 },
+    { SDL_SCANCODE_END, 9, 0x0001 },                     /* Help */
+    { SDL_SCANCODE_PERIOD, 9, 0x0002 }, { SDL_SCANCODE_SEMICOLON, 9, 0x0008 },
+    { SDL_SCANCODE_COMMA, 0, 0x0400 },
+    { SDL_SCANCODE_LEFTBRACKET, 2, 0x0400 },             /* ( */
+    { SDL_SCANCODE_RIGHTBRACKET, 0, 0x0200 },            /* ) */
+    { SDL_SCANCODE_Q, 3, 0x0002 }, { SDL_SCANCODE_W, 3, 0x0040 },
+    { SDL_SCANCODE_E, 3, 0x0080 }, { SDL_SCANCODE_R, 2, 0x2000 },
+    { SDL_SCANCODE_T, 2, 0x4000 }, { SDL_SCANCODE_Y, 1, 0x0020 },
+    { SDL_SCANCODE_U, 1, 0x0040 }, { SDL_SCANCODE_I, 0, 0x1000 },
+    { SDL_SCANCODE_O, 0, 0x2000 }, { SDL_SCANCODE_P, 9, 0x0010 },
+    { SDL_SCANCODE_A, 3, 0x0004 }, { SDL_SCANCODE_S, 3, 0x0020 },
+    { SDL_SCANCODE_D, 2, 0x0100 }, { SDL_SCANCODE_F, 2, 0x1000 },
+    { SDL_SCANCODE_G, 1, 0x0002 }, { SDL_SCANCODE_H, 1, 0x0010 },
+    { SDL_SCANCODE_J, 1, 0x0080 }, { SDL_SCANCODE_K, 0, 0x0800 },
+    { SDL_SCANCODE_L, 0, 0x4000 },
+    { SDL_SCANCODE_Z, 3, 0x0008 }, { SDL_SCANCODE_X, 3, 0x0010 },
+    { SDL_SCANCODE_C, 2, 0x0200 }, { SDL_SCANCODE_V, 2, 0x0800 },
+    { SDL_SCANCODE_B, 1, 0x0004 }, { SDL_SCANCODE_N, 1, 0x0008 },
+    { SDL_SCANCODE_M, 0, 0x0100 },
+};
+
+/* PC keys that are the Xtreme's Fn + a letter: 1-0 on the top letter
+ * row, and - = / ' */
+static const keymap_t FN_KEYS[] = {
+    { SDL_SCANCODE_1, 3, 0x0002 }, { SDL_SCANCODE_2, 3, 0x0040 },
+    { SDL_SCANCODE_3, 3, 0x0080 }, { SDL_SCANCODE_4, 2, 0x2000 },
+    { SDL_SCANCODE_5, 2, 0x4000 }, { SDL_SCANCODE_6, 1, 0x0020 },
+    { SDL_SCANCODE_7, 1, 0x0040 }, { SDL_SCANCODE_8, 0, 0x1000 },
+    { SDL_SCANCODE_9, 0, 0x2000 }, { SDL_SCANCODE_0, 9, 0x0010 },
+    { SDL_SCANCODE_MINUS, 1, 0x0080 }, { SDL_SCANCODE_EQUALS, 0, 0x4000 },
+    { SDL_SCANCODE_SLASH, 9, 0x0002 }, { SDL_SCANCODE_APOSTROPHE, 0, 0x0400 },
+};
+
+/* img/xtremeShell.png, key caps found by their dark pixels. The photo's
+ * last keys are labelled loosely; they take the Xtreme's real layout by
+ * position: ; ends the middle row, , . ! end the bottom row. */
+static const shell_hit_t SHELL_HITS[] = {
+    /* F1-F7 */
+    { 193, 533, 28, 0, 0, 6, 0x0001 }, { 260, 533, 27, 0, 0, 5, 0x0001 },
+    { 326, 534, 26, 0, 0, 4, 0x0001 }, { 392, 536, 26, 0, 0, 3, 0x0001 },
+    { 459, 534, 26, 0, 0, 2, 0x0001 }, { 526, 534, 27, 0, 0, 1, 0x0001 },
+    { 594, 534, 28, 0, 0, 0, 0x0001 },
+    /* Esc, Menu, Tab, Enter, Del, Ins, Select */
+    { 96, 1018, 0, 210, 1107, 5, 0x0400 }, { 246, 1041, 38, 0, 0, 4, 0x0020 },
+    { 486, 1071, 53, 0, 0, 5, 0x0080 }, { 545, 1017, 0, 721, 1166, 4, 0x0008 },
+    { 462, 1154, 42, 0, 0, 5, 0x0100 }, { 524, 1228, 48, 0, 0, 5, 0x0200 },
+    { 575, 1197, 0, 733, 1325, 4, 0x0010 },
+    /* the pad: up, down, left, right around the disc at 280,1208 */
+    { 280, 1160, 34, 0, 0, 6, 0x0800 }, { 280, 1256, 34, 0, 0, 6, 0x2000 },
+    { 232, 1208, 34, 0, 0, 6, 0x4000 }, { 328, 1208, 34, 0, 0, 6, 0x1000 },
+    /* Q W E R T Y U I O P */
+    { 133, 1434, 28, 0, 0, 3, 0x0002 }, { 194, 1411, 28, 0, 0, 3, 0x0040 },
+    { 256, 1392, 28, 0, 0, 3, 0x0080 }, { 320, 1378, 28, 0, 0, 2, 0x2000 },
+    { 384, 1373, 28, 0, 0, 2, 0x4000 }, { 448, 1373, 28, 0, 0, 1, 0x0020 },
+    { 511, 1378, 28, 0, 0, 1, 0x0040 }, { 573, 1389, 28, 0, 0, 0, 0x1000 },
+    { 635, 1406, 28, 0, 0, 0, 0x2000 }, { 694, 1428, 28, 0, 0, 9, 0x0010 },
+    /* A S D F G H J K L ; */
+    { 132, 1513, 28, 0, 0, 3, 0x0004 }, { 195, 1494, 28, 0, 0, 3, 0x0020 },
+    { 258, 1478, 28, 0, 0, 2, 0x0100 }, { 322, 1468, 28, 0, 0, 2, 0x1000 },
+    { 386, 1463, 28, 0, 0, 1, 0x0002 }, { 450, 1464, 28, 0, 0, 1, 0x0010 },
+    { 513, 1467, 28, 0, 0, 1, 0x0080 }, { 576, 1475, 28, 0, 0, 0, 0x0800 },
+    { 639, 1488, 28, 0, 0, 0, 0x4000 }, { 699, 1506, 28, 0, 0, 9, 0x0008 },
+    /* Z X C V B N M , . ! */
+    { 130, 1602, 28, 0, 0, 3, 0x0008 }, { 194, 1583, 28, 0, 0, 3, 0x0010 },
+    { 258, 1569, 28, 0, 0, 2, 0x0200 }, { 323, 1559, 28, 0, 0, 2, 0x0800 },
+    { 388, 1553, 28, 0, 0, 1, 0x0004 }, { 452, 1553, 28, 0, 0, 1, 0x0008 },
+    { 516, 1556, 28, 0, 0, 0, 0x0100 }, { 580, 1564, 28, 0, 0, 0, 0x0400 },
+    { 644, 1577, 28, 0, 0, 9, 0x0002 }, { 705, 1594, 28, 0, 0, 9, 0x0004 },
+    /* ( and ), Shift, Space, Fn */
+    { 302, 1636, 25, 0, 0, 2, 0x0400 }, { 543, 1634, 25, 0, 0, 0, 0x0200 },
+    { 159, 1633, 0, 275, 1706, 8, 0x8000 }, { 342, 1613, 0, 504, 1697, 4, 0x0040 },
+    { 569, 1627, 0, 679, 1701, 7, 0x8000 },
+};
+#endif
 
 static int find_held(sdl_ctx_t *s, int col, uint16_t mask);
 static void drop_held(sdl_ctx_t *s, int i);
@@ -295,18 +453,18 @@ static const char *find_shell_png(const char *explicit) {
     const char *env = getenv("CYBIKO_SHELL");
     if (env && file_ok(env)) return env;
     static const char *rel[] = {
-        "img/cybiko.png", "../img/cybiko.png", "../../img/cybiko.png", NULL
+        "img/" SHELL_FILE, "../img/" SHELL_FILE, "../../img/" SHELL_FILE, NULL
     };
     for (int i = 0; rel[i]; i++)
         if (file_ok(rel[i])) return rel[i];
     char exe[4096];
     host_exe_dir(exe, sizeof exe);
     if (exe[0]) {
-        snprintf(buf, sizeof buf, "%s/img/cybiko.png", exe);
+        snprintf(buf, sizeof buf, "%s/img/" SHELL_FILE, exe);
         if (file_ok(buf)) return buf;
-        snprintf(buf, sizeof buf, "%s/../img/cybiko.png", exe);
+        snprintf(buf, sizeof buf, "%s/../img/" SHELL_FILE, exe);
         if (file_ok(buf)) return buf;
-        snprintf(buf, sizeof buf, "%s/../../img/cybiko.png", exe);
+        snprintf(buf, sizeof buf, "%s/../../img/" SHELL_FILE, exe);
         if (file_ok(buf)) return buf;
     }
     return NULL;
@@ -474,7 +632,11 @@ static void draw_text(SDL_Renderer *ren, int x, int y, int scale,
 }
 
 static const char *MENU_LABEL[MENU_N] = {
+#ifdef CYBIKO_MACHINE_V1
+    "Settings", "Apps", "Status", "Help", "Minimize", "Close"
+#else
     "Settings", "Status", "Help", "Minimize", "Close"
+#endif
 };
 
 static void menu_rect(const sdl_ctx_t *s, SDL_Rect *out) {
@@ -557,6 +719,7 @@ static void load_prefs(sdl_ctx_t *s) {
             s->color = v;
         } else if (sscanf(line, "view=%d", &v) == 1) {
             s->view = (v == VIEW_CLOSEUP) ? VIEW_CLOSEUP : VIEW_BODY;
+        } else if (sscanf(line, "machine=%15s", s->machine_pref) == 1) {
         }
     }
     fclose(f);
@@ -567,9 +730,9 @@ static void save_prefs(const sdl_ctx_t *s) {
     if (!p) return;
     FILE *f = fopen(p, "w");
     if (!f) return;
-    fprintf(f, "scale=%d\nalways_on_top=%d\nmute=%d\ncolor=%d\nview=%d\n",
+    fprintf(f, "scale=%d\nalways_on_top=%d\nmute=%d\ncolor=%d\nview=%d\nmachine=%s\n",
             s->scale_pct, s->always_on_top ? 1 : 0, s->mute ? 1 : 0,
-            s->color, s->view);
+            s->color, s->view, s->machine_pref[0] ? s->machine_pref : MACHINE_NAME);
     fclose(f);
 }
 
@@ -1061,8 +1224,9 @@ static void draw_swatch(SDL_Renderer *ren, int x, int y, int on,
 #define FLASH_BTN_H 28
 #define DEVICE_BTN_Y 276
 #define POWER_BTN_X 188
-#define FLASH_HELTEC_Y 336
-#define FLASH_TDECK_Y 374
+#define MACHINE_BTN_Y 336
+#define FLASH_HELTEC_Y 396
+#define FLASH_TDECK_Y 434
 
 static void draw_flash_btn(SDL_Renderer *ren, int x, int y,
                            int busy, int found,
@@ -1172,7 +1336,17 @@ static void draw_settings(sdl_ctx_t *s) {
                    ar, ag, ab, "Reboot", NULL);
     draw_flash_btn(s->settings_ren, POWER_BTN_X, DEVICE_BTN_Y, 0, 1,
                    ar, ag, ab, s->powered ? "Power off" : "Power on", NULL);
-    draw_text(s->settings_ren, 24, 316, 2, ar, ag, ab, "Flash");
+    draw_text(s->settings_ren, 24, 316, 2, ar, ag, ab, "Machine");
+#ifdef CYBIKO_MACHINE_V1
+    draw_flash_btn(s->settings_ren, FLASH_BTN_X, MACHINE_BTN_Y, 0, 1, ar, ag, ab,
+                   OTHER_MACHINE, NULL);
+    draw_flash_btn(s->settings_ren, POWER_BTN_X, MACHINE_BTN_Y, 0, 1, ar, ag, ab,
+                   "Apps", NULL);
+#else
+    draw_flash_btn(s->settings_ren, FLASH_BTN_X, MACHINE_BTN_Y, 0, 1, ar, ag, ab,
+                   OTHER_MACHINE, "running the " MACHINE_NAME);
+#endif
+    draw_text(s->settings_ren, 24, 376, 2, ar, ag, ab, "Flash");
     {
         char hs[28] = "not found", ts[28] = "not found";
         int hbusy = s->flash_state == FLASH_BUSY && s->flash_target == FLASH_HELTEC;
@@ -1193,9 +1367,9 @@ static void draw_settings(sdl_ctx_t *s) {
         if (s->flash_state == FLASH_ERR) { r = 255; g = 90; b = 90; }
         else if (s->flash_state == FLASH_OK) { r = 90; g = 220; b = 130; }
         else if (s->flash_state == FLASH_BUSY) { r = ar; g = ag; b = ab; }
-        draw_text(s->settings_ren, 24, 414, 1, r, g, b, s->flash_msg);
+        draw_text(s->settings_ren, 24, 474, 1, r, g, b, s->flash_msg);
     }
-    draw_text(s->settings_ren, 24, 452, 2, ar, ag, ab, "[ Done ]");
+    draw_text(s->settings_ren, 24, 512, 2, ar, ag, ab, "[ Done ]");
     SDL_RenderPresent(s->settings_ren);
 }
 
@@ -1246,6 +1420,853 @@ static void blank_lcd(sdl_ctx_t *s) {
     present(s);
 }
 
+#ifdef CYBIKO_MACHINE_V1
+/* The Classic's serial port: CyOS's console. The app link drives it;
+ * --serial (Linux) also puts it on a pseudo-terminal. */
+static int serial_fd = -1;
+static FILE *serial_log;
+static uint8_t serial_in[4096];
+static int serial_in_n;
+
+static void serial_log_bytes(char dir, const uint8_t *b, int n) {
+    static char last_dir;
+    static int col;
+    if (!serial_log || n <= 0) return;
+    for (int i = 0; i < n; i++) {
+        if (dir != last_dir || col == 32) {
+            fprintf(serial_log, "%s%c %10u ", last_dir ? "\n" : "", dir, (unsigned)SDL_GetTicks());
+            last_dir = dir;
+            col = 0;
+        }
+        fprintf(serial_log, "%02X", b[i]);
+        col++;
+    }
+    fflush(serial_log);
+}
+
+static rb_con_t apps_con;
+
+static void serial_tx(void *user, uint8_t byte) {
+    (void)user;
+    rb_con_rx(&apps_con, byte);
+    serial_log_bytes('<', &byte, 1);   /* < from the Cybiko */
+#ifndef _WIN32
+    if (serial_fd >= 0 && write(serial_fd, &byte, 1) < 0) {
+        /* nobody on the other end yet: the byte is lost, as on a cable */
+    }
+#endif
+}
+
+#ifndef _WIN32
+static bool serial_open(const char *spec) {
+    int fd = open("/dev/ptmx", O_RDWR | O_NOCTTY | O_NONBLOCK);
+    int unlock = 0;
+    unsigned int n = 0;
+    if (fd < 0 || ioctl(fd, TIOCSPTLCK, &unlock) < 0 || ioctl(fd, TIOCGPTN, &n) < 0) {
+        fprintf(stderr, "serial: no pseudo-terminal: %s\n", strerror(errno));
+        if (fd >= 0) close(fd);
+        return false;
+    }
+    struct termios t;
+    if (tcgetattr(fd, &t) == 0) {
+        cfmakeraw(&t);
+        cfsetispeed(&t, B57600);
+        cfsetospeed(&t, B57600);
+        tcsetattr(fd, TCSANOW, &t);
+    }
+    char pts[64];
+    snprintf(pts, sizeof pts, "/dev/pts/%u", n);
+    serial_fd = fd;
+    if (strcmp(spec, "pty") != 0) {
+        unlink(spec);
+        if (symlink(pts, spec) != 0)
+            fprintf(stderr, "serial: cannot link %s: %s\n", spec, strerror(errno));
+        else
+            fprintf(stderr, "Serial port on %s (linked as %s)\n", pts, spec);
+    } else {
+        fprintf(stderr, "Serial port on %s\n", pts);
+    }
+    return true;
+}
+
+#endif
+
+/* Once a frame: what the PC sent goes to the Cybiko */
+static void serial_pump(cybiko_emu_t *emu) {
+#ifdef _WIN32
+    (void)emu;
+    return;
+#endif
+    if (serial_fd < 0) return;
+    if (serial_in_n < (int)sizeof serial_in) {
+        ssize_t r = read(serial_fd, serial_in + serial_in_n, sizeof serial_in - (size_t)serial_in_n);
+        if (r > 0) {
+            serial_log_bytes('>', serial_in + serial_in_n, (int)r);   /* > to the Cybiko */
+            serial_in_n += (int)r;
+        }
+    }
+    int took = cybiko_serial_put(emu, serial_in, serial_in_n);
+    if (took > 0) {
+        memmove(serial_in, serial_in + took, (size_t)(serial_in_n - took));
+        serial_in_n -= took;
+    }
+}
+
+/* The app link: one PC tool at a time on 127.0.0.1 */
+#ifdef _WIN32
+typedef SOCKET sock_t;
+#define SOCK_NONE INVALID_SOCKET
+#define sock_close closesocket
+#else
+typedef int sock_t;
+#define SOCK_NONE (-1)
+#define sock_close close
+#endif
+static sock_t link_listen = SOCK_NONE, link_peer = SOCK_NONE;
+static rb_link_t apps_link;
+static cybiko_emu_t *link_emu;
+
+static void sock_nonblock(sock_t s) {
+#ifdef _WIN32
+    u_long on = 1;
+    ioctlsocket(s, FIONBIO, &on);
+#else
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+#endif
+}
+
+static void link_send(void *ctx, const uint8_t *data, size_t n) {
+    (void)ctx;
+    while (n > 0 && link_peer != SOCK_NONE) {
+        int r = (int)send(link_peer, (const char *)data, (int)(n > 65536 ? 65536 : n), 0);
+        if (r > 0) {
+            data += r;
+            n -= (size_t)r;
+        } else {
+            SDL_Delay(1);   /* the socket is non-blocking; the PC catches up */
+#ifdef _WIN32
+            if (WSAGetLastError() != WSAEWOULDBLOCK) break;
+#else
+            if (errno != EAGAIN && errno != EWOULDBLOCK) break;
+#endif
+        }
+    }
+}
+
+static const uint8_t *link_flash(void *ctx, size_t *len) {
+    (void)ctx;
+    uint32_t writes;
+    return cybiko_get_spi_flash(link_emu, len, &writes);
+}
+
+static int link_put(void *ctx, const uint8_t *data, int n) {
+    return cybiko_serial_put((cybiko_emu_t *)ctx, data, n);
+}
+
+static void link_open(cybiko_emu_t *emu, int port) {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
+#endif
+    link_emu = emu;
+    rb_link_init(&apps_link, &apps_con);
+    apps_link.send = link_send;
+    apps_link.flash = link_flash;
+    apps_link.alloc = malloc;
+    apps_link.release = free;
+    sock_t s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((unsigned short)port);
+    a.sin_addr.s_addr = htonl(0x7F000001);   /* this PC only */
+    int on = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&on, sizeof on);
+    if (s == SOCK_NONE || bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 1) != 0) {
+        fprintf(stderr, "app link: port %d is taken (another ReBiko Desktop?)\n", port);
+        if (s != SOCK_NONE) sock_close(s);
+        return;
+    }
+    sock_nonblock(s);
+    link_listen = s;
+    fprintf(stderr, "App link on 127.0.0.1:%d\n", port);
+}
+
+/* Once a frame: PC commands in, CyOS's console driven, replies out */
+static void link_pump(void) {
+    if (link_listen == SOCK_NONE) return;
+    if (link_peer == SOCK_NONE) {
+        sock_t p = accept(link_listen, NULL, NULL);
+        if (p != SOCK_NONE) {
+            sock_nonblock(p);
+            link_peer = p;
+        }
+    }
+    if (link_peer != SOCK_NONE) {
+        char buf[8192];
+        int r = (int)recv(link_peer, buf, sizeof buf, 0);
+        if (r > 0) {
+            rb_link_rx(&apps_link, (const uint8_t *)buf, (size_t)r);
+        } else if (r == 0) {
+            sock_close(link_peer);
+            link_peer = SOCK_NONE;
+        }
+    }
+    rb_link_poll(&apps_link);
+}
+
+static uint8_t *load_file(const char *path, size_t *out);
+static void dir_of(const char *path, char *out, size_t cap);
+
+/* ---- Apps window (Classic): the app library on the left, the Cybiko's
+ * files on the right. Apps go in through CyOS's console while it runs
+ * and show on its desktop after Restart CyOS; files come off the flash. */
+
+#define APPS_W 800
+#define APPS_H 580
+#define APPS_ROW 14
+#define APPS_LIST_Y 128
+#define APPS_ROWS 25
+#define APPS_LIB_X 16
+#define APPS_LIB_W 420
+#define APPS_DEV_X 452
+#define APPS_DEV_W 332
+#define APPS_BTN_Y 500
+#define APPS_BTN_H 28
+#define APPS_MAX_FOLDERS 12
+
+typedef struct {
+    char *path;
+    char name[60];
+    char folder[48];
+    uint32_t size;
+} lib_app_t;
+
+static lib_app_t *lib;
+static int lib_n, lib_cap;
+static char lib_root[4096];
+static char lib_folders[APPS_MAX_FOLDERS][48];
+static int lib_folder_n, lib_folder_sel = -1;   /* -1: all */
+static char apps_find[40];
+static int *lib_view, lib_view_n, lib_top, lib_sel = -1;
+static rb_cfs_entry_t dev_list[256];
+static int dev_n, dev_top, dev_sel = -1;
+static uint32_t dev_free;
+static char apps_msg[200];
+static int apps_msg_kind;          /* 0 note, 1 done, 2 failed, 3 working */
+static uint8_t *apps_buf;
+static char apps_op_name[60];
+static int apps_op;                /* 0 none, 1 send, 2 delete, 3 restart */
+static uint32_t apps_refresh_at;
+static SDL_Window *apps_win;
+static SDL_Renderer *apps_ren;
+
+static bool has_app_ext(const char *n) {
+    size_t k = strlen(n);
+    return k > 4 && n[k - 4] == '.' && tolower((unsigned char)n[k - 3]) == 'a'
+        && tolower((unsigned char)n[k - 2]) == 'p' && tolower((unsigned char)n[k - 1]) == 'p';
+}
+
+static void lib_add(const char *path, const char *name, const char *folder) {
+    struct stat st;
+    if (strlen(name) > 58 || stat(path, &st) != 0) return;
+    if (lib_n == lib_cap) {
+        lib_cap = lib_cap ? lib_cap * 2 : 256;
+        lib = realloc(lib, (size_t)lib_cap * sizeof *lib);
+    }
+    lib_app_t *a = &lib[lib_n++];
+    a->path = strdup(path);
+    snprintf(a->name, sizeof a->name, "%s", name);
+    snprintf(a->folder, sizeof a->folder, "%s", folder);
+    a->size = (uint32_t)st.st_size;
+}
+
+/* Every .app under dir; folder is the top folder under the library root */
+static void lib_scan(const char *dir, const char *folder, int depth) {
+    char path[4096];
+    if (depth > 6) return;
+#ifdef _WIN32
+    WIN32_FIND_DATAA fd;
+    snprintf(path, sizeof path, "%s\\*", dir);
+    HANDLE h = FindFirstFileA(path, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const char *n = fd.cFileName;
+        if (n[0] == '.') continue;
+        snprintf(path, sizeof path, "%s/%s", dir, n);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            lib_scan(path, folder[0] ? folder : n, depth + 1);
+        else if (has_app_ext(n))
+            lib_add(path, n, folder);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    if (!d) return;
+    while ((e = readdir(d)) != NULL) {
+        struct stat st;
+        if (e->d_name[0] == '.') continue;
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode))
+            lib_scan(path, folder[0] ? folder : e->d_name, depth + 1);
+        else if (has_app_ext(e->d_name))
+            lib_add(path, e->d_name, folder);
+    }
+    closedir(d);
+#endif
+}
+
+static int lib_cmp(const void *a, const void *b) {
+    const lib_app_t *x = a, *y = b;
+    int c = strcasecmp(x->name, y->name);
+    return c ? c : strcasecmp(x->folder, y->folder);
+}
+
+/* A folder holding one folder and no apps is not a level worth showing:
+ * Apps/cybiko/games reads as "games" */
+static void lib_descend(char *root, size_t cap) {
+    for (int i = 0; i < 4; i++) {
+        char only[256] = "";
+        int dirs = 0, apps = 0;
+#ifdef _WIN32
+        WIN32_FIND_DATAA fd;
+        char pat[4096];
+        snprintf(pat, sizeof pat, "%s\\*", root);
+        HANDLE h = FindFirstFileA(pat, &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (fd.cFileName[0] == '.') continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                dirs++;
+                snprintf(only, sizeof only, "%s", fd.cFileName);
+            } else if (has_app_ext(fd.cFileName)) {
+                apps++;
+            }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+#else
+        DIR *d = opendir(root);
+        struct dirent *e;
+        if (!d) return;
+        while ((e = readdir(d)) != NULL) {
+            char p[4096];
+            struct stat st;
+            if (e->d_name[0] == '.') continue;
+            snprintf(p, sizeof p, "%s/%s", root, e->d_name);
+            if (stat(p, &st) != 0) continue;
+            if (S_ISDIR(st.st_mode)) {
+                dirs++;
+                snprintf(only, sizeof only, "%s", e->d_name);
+            } else if (has_app_ext(e->d_name)) {
+                apps++;
+            }
+        }
+        closedir(d);
+#endif
+        if (dirs != 1 || apps != 0) return;
+        size_t k = strlen(root);
+        snprintf(root + k, cap - k, "/%s", only);
+    }
+}
+
+static bool find_library(const sdl_ctx_t *s, char *out, size_t cap) {
+    char rom_dir[4096], exe[4096], cand[4096];
+    const char *env = getenv("CYBIKO_APPS");
+    if (env && env[0]) { snprintf(out, cap, "%s", env); return true; }
+    dir_of(s->boot_path ? s->boot_path : ".", rom_dir, sizeof rom_dir);
+    host_exe_dir(exe, sizeof exe);
+    const char *tries[] = { "%s/../Apps", "%s/Apps", NULL };
+    const char *bases[] = { rom_dir, exe, ".", NULL };
+    for (int b = 0; bases[b]; b++) {
+        for (int t = 0; tries[t]; t++) {
+            struct stat st;
+            snprintf(cand, sizeof cand, tries[t], bases[b]);
+            if (stat(cand, &st) == 0 && S_ISDIR(st.st_mode)) {
+                snprintf(out, cap, "%s", cand);
+                return true;
+            }
+        }
+        /* the source tree: cybiko-lilygo/.pio next to Apps/ two levels up */
+        struct stat st;
+        snprintf(cand, sizeof cand, "%s/../../Apps", bases[b]);
+        if (stat(cand, &st) == 0 && S_ISDIR(st.st_mode)) {
+            snprintf(out, cap, "%s", cand);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void lib_filter(void) {
+    char want[40];
+    int k = 0;
+    for (; apps_find[k] && k < 39; k++) want[k] = (char)tolower((unsigned char)apps_find[k]);
+    want[k] = 0;
+    lib_view = realloc(lib_view, (size_t)(lib_n ? lib_n : 1) * sizeof *lib_view);
+    lib_view_n = 0;
+    for (int i = 0; i < lib_n; i++) {
+        if (lib_folder_sel >= 0 && strcmp(lib[i].folder, lib_folders[lib_folder_sel]) != 0)
+            continue;
+        if (want[0]) {
+            char low[60];
+            int j = 0;
+            for (; lib[i].name[j]; j++) low[j] = (char)tolower((unsigned char)lib[i].name[j]);
+            low[j] = 0;
+            if (!strstr(low, want)) continue;
+        }
+        lib_view[lib_view_n++] = i;
+    }
+    lib_top = 0;
+    lib_sel = lib_view_n ? 0 : -1;
+}
+
+static void lib_load(const sdl_ctx_t *s) {
+    for (int i = 0; i < lib_n; i++) free(lib[i].path);
+    lib_n = 0;
+    lib_folder_n = 0;
+    lib_folder_sel = -1;
+    if (!find_library(s, lib_root, sizeof lib_root)) {
+        lib_root[0] = 0;
+        lib_filter();
+        return;
+    }
+    lib_descend(lib_root, sizeof lib_root);
+    lib_scan(lib_root, "", 0);
+    qsort(lib, (size_t)lib_n, sizeof *lib, lib_cmp);
+    /* folders by how many apps they hold, biggest first */
+    int counts[APPS_MAX_FOLDERS] = {0};
+    for (int i = 0; i < lib_n; i++) {
+        int f = 0;
+        while (f < lib_folder_n && strcmp(lib_folders[f], lib[i].folder) != 0) f++;
+        if (f == lib_folder_n) {
+            if (lib_folder_n == APPS_MAX_FOLDERS || !lib[i].folder[0]) continue;
+            snprintf(lib_folders[lib_folder_n++], sizeof lib_folders[0], "%s", lib[i].folder);
+        }
+        counts[f]++;
+    }
+    for (int a = 0; a < lib_folder_n; a++)
+        for (int b = a + 1; b < lib_folder_n; b++)
+            if (counts[b] > counts[a]) {
+                char t[48];
+                int c = counts[a]; counts[a] = counts[b]; counts[b] = c;
+                memcpy(t, lib_folders[a], sizeof t);
+                memcpy(lib_folders[a], lib_folders[b], sizeof t);
+                memcpy(lib_folders[b], t, sizeof t);
+            }
+    lib_filter();
+}
+
+static void dev_refresh(sdl_ctx_t *s) {
+    size_t len = 0;
+    uint32_t writes;
+    const uint8_t *fl = s->emu ? cybiko_get_spi_flash(s->emu, &len, &writes) : NULL;
+    dev_n = fl ? rb_cfs_list(fl, len, dev_list, 256, &dev_free) : 0;
+    for (int a = 0; a < dev_n; a++)
+        for (int b = a + 1; b < dev_n; b++)
+            if (strcasecmp(dev_list[b].name, dev_list[a].name) < 0) {
+                rb_cfs_entry_t t = dev_list[a];
+                dev_list[a] = dev_list[b];
+                dev_list[b] = t;
+            }
+    if (dev_sel >= dev_n) dev_sel = dev_n - 1;
+    if (dev_top > dev_n - APPS_ROWS) dev_top = dev_n > APPS_ROWS ? dev_n - APPS_ROWS : 0;
+    apps_refresh_at = SDL_GetTicks() + 2000;
+}
+
+static void apps_say(int kind, const char *fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 2, 3)))
+#endif
+    ;
+static void apps_say(int kind, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(apps_msg, sizeof apps_msg, fmt, ap);
+    va_end(ap);
+    apps_msg_kind = kind;
+}
+
+/* Send and Restart CyOS under the library, Delete and Copy to PC under
+ * the Cybiko's files */
+static const char *apps_btn_label[4] = { "Send", "Delete", "Copy to PC", "Restart CyOS" };
+static const int apps_btn_x[4] = { 16, 452, 588, 152 };
+static const int apps_btn_w[4] = { 124, 124, 180, 212 };
+
+static void apps_box(SDL_Renderer *r, int x, int y, int w, int h,
+                     uint8_t cr, uint8_t cg, uint8_t cb) {
+    SDL_Rect box = { x, y, w, h };
+    SDL_SetRenderDrawColor(r, cr, cg, cb, 255);
+    SDL_RenderDrawRect(r, &box);
+}
+
+/* Text cut to fit n characters */
+static void apps_text(SDL_Renderer *r, int x, int y, int n, uint8_t cr, uint8_t cg, uint8_t cb,
+                      const char *t) {
+    char buf[128];
+    if (n > 127) n = 127;
+    snprintf(buf, (size_t)n + 1, "%s", t);
+    if ((int)strlen(t) > n && n > 2) { buf[n - 2] = '.'; buf[n - 1] = '.'; }
+    draw_text(r, x, y, 1, cr, cg, cb, buf);
+}
+
+static int chip_x[APPS_MAX_FOLDERS + 1], chip_y[APPS_MAX_FOLDERS + 1], chip_w[APPS_MAX_FOLDERS + 1];
+
+static void draw_apps(sdl_ctx_t *s) {
+    uint8_t ar, ag, ab;
+    char line[160];
+    if (!apps_ren) return;
+    SDL_Renderer *r = apps_ren;
+    shell_accent(s->color, &ar, &ag, &ab);
+    SDL_SetRenderDrawColor(r, 16, 20, 28, 255);
+    SDL_RenderClear(r);
+    draw_text(r, 16, 14, 2, ar, ag, ab, "Apps");
+
+    /* library */
+    snprintf(line, sizeof line, "Library  %d apps", lib_n);
+    draw_text(r, APPS_LIB_X, 44, 1, 230, 240, 255, lib_root[0] ? line : "No Apps folder found");
+    snprintf(line, sizeof line, "Find: %s_", apps_find);
+    draw_text(r, APPS_LIB_X + 200, 44, 1, apps_find[0] ? 255 : 150, apps_find[0] ? 255 : 160,
+              apps_find[0] ? 255 : 176, line);
+    /* folder chips, wrapping to a second row */
+    {
+        int x = APPS_LIB_X, y = 62;
+        for (int i = -1; i < lib_folder_n; i++) {
+            char label[20];
+            snprintf(label, sizeof label, "%.14s", i < 0 ? "All" : lib_folders[i]);
+            int w = (int)strlen(label) * 8 + 12;
+            if (x + w > APPS_LIB_X + APPS_LIB_W) { x = APPS_LIB_X; y += 22; }
+            if (y > 84) break;
+            chip_x[i + 1] = x; chip_y[i + 1] = y; chip_w[i + 1] = w;
+            bool on = i == lib_folder_sel;
+            if (on) {
+                SDL_Rect box = { x, y, w, 18 };
+                SDL_SetRenderDrawColor(r, ar, ag, ab, 255);
+                SDL_RenderFillRect(r, &box);
+                draw_text(r, x + 6, y + 5, 1, 16, 20, 28, label);
+            } else {
+                apps_box(r, x, y, w, 18, 72, 78, 90);
+                draw_text(r, x + 6, y + 5, 1, 200, 210, 220, label);
+            }
+            x += w + 6;
+        }
+        for (int i = lib_folder_n + 1; i <= APPS_MAX_FOLDERS; i++) chip_w[i] = 0;
+    }
+    apps_box(r, APPS_LIB_X - 2, APPS_LIST_Y - 2, APPS_LIB_W + 4, APPS_ROWS * APPS_ROW + 4, 72, 78, 90);
+    for (int i = 0; i < APPS_ROWS && lib_top + i < lib_view_n; i++) {
+        int k = lib_top + i, y = APPS_LIST_Y + i * APPS_ROW;
+        const lib_app_t *a = &lib[lib_view[k]];
+        bool sel = k == lib_sel;
+        if (sel) {
+            SDL_Rect hi = { APPS_LIB_X, y, APPS_LIB_W, APPS_ROW };
+            SDL_SetRenderDrawColor(r, 40, 52, 72, 255);
+            SDL_RenderFillRect(r, &hi);
+        }
+        apps_text(r, APPS_LIB_X + 4, y + 3, 26, 230, 240, 255, a->name);
+        apps_text(r, APPS_LIB_X + 220, y + 3, 14, 140, 150, 166, a->folder);
+        snprintf(line, sizeof line, "%7lu", (unsigned long)a->size);
+        draw_text(r, APPS_LIB_X + APPS_LIB_W - 60, y + 3, 1, 200, 210, 220, line);
+    }
+    if (lib_view_n > APPS_ROWS) {
+        snprintf(line, sizeof line, "%d-%d of %d", lib_top + 1,
+                 lib_top + APPS_ROWS < lib_view_n ? lib_top + APPS_ROWS : lib_view_n, lib_view_n);
+        draw_text(r, APPS_LIB_X, APPS_LIST_Y + APPS_ROWS * APPS_ROW + 6, 1, 140, 150, 166, line);
+    }
+
+    /* the Cybiko */
+    snprintf(line, sizeof line, "On the Cybiko  %d files, %lu bytes free", dev_n,
+             (unsigned long)dev_free);
+    draw_text(r, APPS_DEV_X, 44, 1, 230, 240, 255, line);
+    draw_text(r, APPS_DEV_X, 62, 1, 140, 150, 166, "New apps show after Restart CyOS.");
+    apps_box(r, APPS_DEV_X - 2, APPS_LIST_Y - 2, APPS_DEV_W + 4, APPS_ROWS * APPS_ROW + 4, 72, 78, 90);
+    for (int i = 0; i < APPS_ROWS && dev_top + i < dev_n; i++) {
+        int k = dev_top + i, y = APPS_LIST_Y + i * APPS_ROW;
+        if (k == dev_sel) {
+            SDL_Rect hi = { APPS_DEV_X, y, APPS_DEV_W, APPS_ROW };
+            SDL_SetRenderDrawColor(r, 40, 52, 72, 255);
+            SDL_RenderFillRect(r, &hi);
+        }
+        apps_text(r, APPS_DEV_X + 4, y + 3, 30, 230, 240, 255, dev_list[k].name);
+        snprintf(line, sizeof line, "%7lu", (unsigned long)dev_list[k].size);
+        draw_text(r, APPS_DEV_X + APPS_DEV_W - 60, y + 3, 1, 200, 210, 220, line);
+    }
+
+    for (int b = 0; b < 4; b++) {
+        bool busy = apps_op != 0;
+        bool usable = !busy && (b == 3 || (b == 0 ? lib_sel >= 0 : dev_sel >= 0));
+        SDL_Rect box = { apps_btn_x[b], APPS_BTN_Y, apps_btn_w[b], APPS_BTN_H };
+        SDL_SetRenderDrawColor(r, 28, 34, 46, 255);
+        SDL_RenderFillRect(r, &box);
+        apps_box(r, box.x, box.y, box.w, box.h, usable ? ar : 72, usable ? ag : 78, usable ? ab : 90);
+        int tw = (int)strlen(apps_btn_label[b]) * 16;
+        draw_text(r, box.x + (box.w - tw) / 2, box.y + 6, 2,
+                  usable ? 230 : 120, usable ? 240 : 128, usable ? 255 : 140, apps_btn_label[b]);
+    }
+    if (apps_msg[0]) {
+        uint8_t mr = 230, mg = 240, mb = 255;
+        if (apps_msg_kind == 1) { mr = 90; mg = 220; mb = 130; }
+        else if (apps_msg_kind == 2) { mr = 255; mg = 90; mb = 90; }
+        else if (apps_msg_kind == 3) { mr = ar; mg = ag; mb = ab; }
+        apps_text(r, 16, APPS_BTN_Y + 44, 96, mr, mg, mb, apps_msg);
+    }
+    SDL_RenderPresent(r);
+}
+
+static void close_apps(void) {
+    if (apps_ren) SDL_DestroyRenderer(apps_ren);
+    if (apps_win) SDL_DestroyWindow(apps_win);
+    apps_ren = NULL;
+    apps_win = NULL;
+}
+
+static void open_apps(sdl_ctx_t *s) {
+    s->menu_open = false;
+    if (apps_win) {
+        SDL_RaiseWindow(apps_win);
+        return;
+    }
+    apps_win = SDL_CreateWindow("ReBiko Apps", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                APPS_W, APPS_H, s->always_on_top ? SDL_WINDOW_ALWAYS_ON_TOP : 0);
+    apps_ren = apps_win ? SDL_CreateRenderer(apps_win, -1, SDL_RENDERER_ACCELERATED) : NULL;
+    if (!apps_ren) {
+        close_apps();
+        return;
+    }
+    apply_app_icon(s, apps_win);
+    if (!lib_n) lib_load(s);
+    dev_refresh(s);
+    if (!apps_msg[0])
+        apps_say(0, lib_root[0] ? "Pick an app and press Send. Type to search."
+                                : "Put your .app files in an Apps folder next to roms/, or set CYBIKO_APPS.");
+    draw_apps(s);
+}
+
+static void apps_send(sdl_ctx_t *s) {
+    if (lib_sel < 0 || apps_op) return;
+    const lib_app_t *a = &lib[lib_view[lib_sel]];
+    if (!s->powered) { apps_say(2, "The Cybiko is off."); return; }
+    if (a->size + 254 > dev_free) {
+        apps_say(2, "%s needs %lu bytes; the Cybiko has %lu free. Delete something first.",
+                 a->name, (unsigned long)a->size, (unsigned long)dev_free);
+        return;
+    }
+    size_t n = 0;
+    free(apps_buf);
+    apps_buf = load_file(a->path, &n);
+    if (!apps_buf) { apps_say(2, "Cannot read %s", a->path); return; }
+    if (!rb_con_send_file(&apps_con, a->name, apps_buf, (uint32_t)n)) {
+        apps_say(2, "The Cybiko is busy with another transfer.");
+        return;
+    }
+    snprintf(apps_op_name, sizeof apps_op_name, "%s", a->name);
+    apps_op = 1;
+    apps_say(3, "Sending %s...", a->name);
+}
+
+static void apps_delete(void) {
+    char cmd[100];
+    if (dev_sel < 0 || apps_op) return;
+    snprintf(apps_op_name, sizeof apps_op_name, "%s", dev_list[dev_sel].name);
+    snprintf(cmd, sizeof cmd, "rm -f \"%s\"", apps_op_name);
+    if (!rb_con_command(&apps_con, cmd)) {
+        apps_say(2, "The Cybiko is busy with another transfer.");
+        return;
+    }
+    apps_op = 2;
+    apps_say(3, "Deleting %s...", apps_op_name);
+}
+
+static void apps_copy_off(sdl_ctx_t *s) {
+    char dir[4096], path[4200];
+    if (dev_sel < 0) return;
+    const char *name = dev_list[dev_sel].name;
+    size_t len = 0;
+    uint32_t writes;
+    const uint8_t *fl = cybiko_get_spi_flash(s->emu, &len, &writes);
+    long n = fl ? rb_cfs_read(fl, len, name, NULL, 0) : -1;
+    uint8_t *buf = n >= 0 ? malloc(n ? (size_t)n : 1) : NULL;
+    if (!buf) { apps_say(2, "Cannot read %s", name); return; }
+    rb_cfs_read(fl, len, name, buf, (size_t)n);
+    snprintf(dir, sizeof dir, "%s/From Cybiko", lib_root[0] ? lib_root : ".");
+    mkdir(dir, 0755);
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "wb");
+    if (f && fwrite(buf, 1, (size_t)n, f) == (size_t)n) {
+        apps_say(1, "Saved %s (%ld bytes) in %s", name, n, dir);
+        fclose(f);
+        if (has_app_ext(name)) lib_load(s);
+    } else {
+        apps_say(2, "Cannot write %s", path);
+        if (f) fclose(f);
+    }
+    free(buf);
+}
+
+static void apps_restart(void) {
+    if (apps_op) return;
+    if (!rb_con_command(&apps_con, "reboot")) {
+        apps_say(2, "The Cybiko is busy with another transfer.");
+        return;
+    }
+    apps_op = 3;
+    apps_say(3, "Restarting CyOS...");
+}
+
+/* Once a frame */
+static void apps_tick(sdl_ctx_t *s) {
+    if (!apps_win) return;
+    bool redraw = false;
+    if (apps_op && apps_con.state == RB_CON_BUSY && apps_op == 1) {
+        char m[200];
+        snprintf(m, sizeof m, "Sending %s: block %lu of %lu", apps_op_name,
+                 (unsigned long)apps_con.blocks_sent, (unsigned long)((apps_con.size + 511) / 512));
+        if (strcmp(m, apps_msg) != 0) { apps_say(3, "%s", m); redraw = true; }
+    }
+    if (apps_op && apps_con.state != RB_CON_BUSY) {
+        bool ok = apps_con.state == RB_CON_DONE;
+        if (apps_op == 1)
+            ok ? apps_say(1, "%s is on the Cybiko. Restart CyOS to see it on the desktop.", apps_op_name)
+               : apps_say(2, "%s: %s", apps_op_name, apps_con.result);
+        else if (apps_op == 2)
+            ok ? apps_say(1, "Deleted %s", apps_op_name) : apps_say(2, "%s", apps_con.result);
+        else
+            ok ? apps_say(1, "CyOS is restarting; new apps are on its desktop when it is back.")
+               : apps_say(2, "%s", apps_con.result);
+        apps_con.state = RB_CON_IDLE;
+        apps_op = 0;
+        free(apps_buf);
+        apps_buf = NULL;
+        dev_refresh(s);
+        redraw = true;
+    }
+    if (SDL_GetTicks() >= apps_refresh_at) {
+        int before = dev_n;
+        uint32_t free_before = dev_free;
+        dev_refresh(s);
+        redraw |= before != dev_n || free_before != dev_free;
+    }
+    if (redraw) draw_apps(s);
+}
+
+static void lib_scroll(int d) {
+    lib_top += d;
+    if (lib_top > lib_view_n - APPS_ROWS) lib_top = lib_view_n - APPS_ROWS;
+    if (lib_top < 0) lib_top = 0;
+}
+
+static void lib_select(int k) {
+    if (!lib_view_n) return;
+    if (k < 0) k = 0;
+    if (k >= lib_view_n) k = lib_view_n - 1;
+    lib_sel = k;
+    if (k < lib_top) lib_top = k;
+    if (k >= lib_top + APPS_ROWS) lib_top = k - APPS_ROWS + 1;
+}
+
+/* True if the event was the Apps window's */
+static bool apps_event(sdl_ctx_t *s, const SDL_Event *ev) {
+    if (!apps_win) return false;
+    Uint32 id = SDL_GetWindowID(apps_win);
+    switch (ev->type) {
+    case SDL_WINDOWEVENT:
+        if (ev->window.windowID != id) return false;
+        if (ev->window.event == SDL_WINDOWEVENT_CLOSE) close_apps();
+        else if (ev->window.event == SDL_WINDOWEVENT_EXPOSED) draw_apps(s);
+        return true;
+    case SDL_MOUSEWHEEL: {
+        if (ev->wheel.windowID != id) return false;
+        int mx, my;
+        SDL_GetMouseState(&mx, &my);
+        if (mx >= APPS_DEV_X) {
+            dev_top -= ev->wheel.y * 3;
+            if (dev_top > dev_n - APPS_ROWS) dev_top = dev_n - APPS_ROWS;
+            if (dev_top < 0) dev_top = 0;
+        } else {
+            lib_scroll(-ev->wheel.y * 3);
+        }
+        draw_apps(s);
+        return true;
+    }
+    case SDL_MOUSEBUTTONDOWN: {
+        if (ev->button.windowID != id) return false;
+        int x = ev->button.x, y = ev->button.y;
+        if (ev->button.button != SDL_BUTTON_LEFT) return true;
+        for (int i = 0; i <= lib_folder_n && i <= APPS_MAX_FOLDERS; i++)
+            if (chip_w[i] && x >= chip_x[i] && x < chip_x[i] + chip_w[i]
+                && y >= chip_y[i] && y < chip_y[i] + 18) {
+                lib_folder_sel = i - 1;
+                lib_filter();
+            }
+        int row = (y - APPS_LIST_Y) / APPS_ROW;
+        if (y >= APPS_LIST_Y && row < APPS_ROWS) {
+            if (x >= APPS_LIB_X && x < APPS_LIB_X + APPS_LIB_W && lib_top + row < lib_view_n) {
+                bool again = lib_sel == lib_top + row && ev->button.clicks >= 2;
+                lib_sel = lib_top + row;
+                if (again) apps_send(s);
+            } else if (x >= APPS_DEV_X && x < APPS_DEV_X + APPS_DEV_W && dev_top + row < dev_n) {
+                dev_sel = dev_top + row;
+            }
+        }
+        if (y >= APPS_BTN_Y && y < APPS_BTN_Y + APPS_BTN_H) {
+            for (int b = 0; b < 4; b++)
+                if (x >= apps_btn_x[b] && x < apps_btn_x[b] + apps_btn_w[b]) {
+                    if (b == 0) apps_send(s);
+                    else if (b == 1) apps_delete();
+                    else if (b == 2) apps_copy_off(s);
+                    else apps_restart();
+                }
+        }
+        draw_apps(s);
+        return true;
+    }
+    case SDL_MOUSEBUTTONUP:
+    case SDL_MOUSEMOTION:
+        return (ev->type == SDL_MOUSEMOTION ? ev->motion.windowID : ev->button.windowID) == id;
+    case SDL_KEYDOWN: {
+        if (ev->key.windowID != id) return false;
+        SDL_Keycode k = ev->key.keysym.sym;
+        size_t n = strlen(apps_find);
+        if (k == SDLK_ESCAPE) {
+            if (n) { apps_find[0] = 0; lib_filter(); }
+            else { close_apps(); return true; }
+        } else if (k == SDLK_BACKSPACE) {
+            if (n) { apps_find[n - 1] = 0; lib_filter(); }
+        } else if (k == SDLK_UP) {
+            lib_select(lib_sel - 1);
+        } else if (k == SDLK_DOWN) {
+            lib_select(lib_sel + 1);
+        } else if (k == SDLK_PAGEUP) {
+            lib_select(lib_sel - APPS_ROWS);
+        } else if (k == SDLK_PAGEDOWN) {
+            lib_select(lib_sel + APPS_ROWS);
+        } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+            apps_send(s);
+        } else if (k >= 32 && k < 127 && n < sizeof apps_find - 1
+                   && !(ev->key.keysym.mod & (KMOD_CTRL | KMOD_ALT))) {
+            apps_find[n] = (char)k;
+            apps_find[n + 1] = 0;
+            lib_filter();
+        }
+        draw_apps(s);
+        return true;
+    }
+    case SDL_KEYUP:
+        return ev->key.windowID == id;
+    }
+    return false;
+}
+#endif
+
+static void attach_radio(cybiko_emu_t *emu, cybiko_radio_coproc_t *cop, uint32_t cyid) {
+#ifdef CYBIKO_MACHINE_V1
+    cybiko_attach_radio_id(emu, cop, cyid);
+#else
+    cybiko_patch_cyid(emu, cyid);   /* the Xtreme reads its CyID from flash */
+    cybiko_attach_radio(emu, cop);
+#endif
+}
+
 static void guest_reboot(sdl_ctx_t *s) {
     drop_all_keys(s);
     if (s->emu)
@@ -1255,7 +2276,7 @@ static void guest_reboot(sdl_ctx_t *s) {
         if (s->lora)
             cybiko_radio_coproc_set_transport(s->coproc, &s->lora->base);
         if (s->emu)
-            cybiko_attach_radio_id(s->emu, s->coproc, s->radio_cyid);
+            attach_radio(s->emu, s->coproc, s->radio_cyid);
     }
     if (s->lora)
         cybiko_lora_seed_msg_id(s->lora, (uint32_t)SDL_GetPerformanceCounter());
@@ -1277,6 +2298,82 @@ static void guest_power_off(sdl_ctx_t *s) {
         SDL_ClearQueuedAudio(s->audio);
     }
     fprintf(stderr, "guest power off\n");
+}
+
+/* The other model's build sits next to this one, and its ROMs next to
+ * this one's boot ROM (the release zip's roms/, or this tree's). Its save
+ * goes beside this one's. */
+static void dir_of(const char *path, char *out, size_t cap) {
+    const char *slash = strrchr(path, '/');
+#ifdef _WIN32
+    const char *bs = strrchr(path, '\\');
+    if (bs && (!slash || bs > slash)) slash = bs;
+#endif
+    if (!slash) snprintf(out, cap, ".");
+    else snprintf(out, cap, "%.*s", (int)(slash - path), path);
+}
+
+static bool find_other_machine(sdl_ctx_t *s) {
+    char rom_dir[4096], save_dir[4096], exe[4096];
+    dir_of(s->boot_path, rom_dir, sizeof rom_dir);
+    dir_of(s->nvram_path ? s->nvram_path : s->boot_path, save_dir, sizeof save_dir);
+    host_exe_dir(exe, sizeof exe);
+#ifdef _WIN32
+    snprintf(s->switch_cmd[0], sizeof s->switch_cmd[0], "%s/" OTHER_BIN ".exe", exe[0] ? exe : ".");
+#else
+    snprintf(s->switch_cmd[0], sizeof s->switch_cmd[0], "%s/" OTHER_BIN, exe[0] ? exe : ".");
+#endif
+    snprintf(s->switch_cmd[1], sizeof s->switch_cmd[1], "%s/" OTHER_BOOT, rom_dir);
+    snprintf(s->switch_cmd[2], sizeof s->switch_cmd[2], "%s/" OTHER_FLASH, rom_dir);
+    snprintf(s->switch_save, sizeof s->switch_save, "%s/" OTHER_SAVE, save_dir);
+    if (!file_ok(s->switch_cmd[0])) {
+        snprintf(s->flash_msg, sizeof s->flash_msg, "No " OTHER_BIN " next to this program");
+        return false;
+    }
+    if (!file_ok(s->switch_cmd[1]) || !file_ok(s->switch_cmd[2])) {
+        snprintf(s->flash_msg, sizeof s->flash_msg,
+                 "The " OTHER_MACHINE " needs " OTHER_BOOT " and " OTHER_FLASH " in %s", rom_dir);
+        return false;
+    }
+    return true;
+}
+
+static void request_machine_switch(sdl_ctx_t *s) {
+    s->flash_state = FLASH_ERR;
+    if (!find_other_machine(s))
+        return;
+    s->flash_state = FLASH_IDLE;
+    snprintf(s->machine_pref, sizeof s->machine_pref, "%s", OTHER_MACHINE);
+    save_prefs(s);
+    s->switch_machine = true;
+    if (s->running) *s->running = false;   /* main saves, then starts the other */
+}
+
+/* Replace this process with the other model's build */
+static void exec_other_machine(const sdl_ctx_t *s) {
+    char cyid[16];
+    const char *args[10];
+    int n = 0;
+    snprintf(cyid, sizeof cyid, "%08X", (unsigned)s->cyid);
+    args[n++] = s->switch_cmd[0];
+    args[n++] = s->switch_cmd[1];
+    args[n++] = s->switch_cmd[2];
+    args[n++] = "--nvram";
+    args[n++] = s->switch_save;
+    if (s->radio_arg) {
+        args[n++] = "--radio";
+        args[n++] = s->radio_arg;
+    }
+    args[n++] = "--cyid";
+    args[n++] = cyid;
+    args[n] = NULL;
+    fflush(stderr);
+#ifdef _WIN32
+    _execv(args[0], args);
+#else
+    execv(args[0], (char *const *)args);
+#endif
+    fprintf(stderr, "could not start %s: %s\n", args[0], strerror(errno));
 }
 
 static void settings_click(sdl_ctx_t *s, int x, int y) {
@@ -1333,7 +2430,16 @@ static void settings_click(sdl_ctx_t *s, int x, int y) {
     } else if (x >= FLASH_BTN_X && x < FLASH_BTN_X + FLASH_BTN_W
                && y >= FLASH_TDECK_Y && y < FLASH_TDECK_Y + FLASH_BTN_H) {
         start_flash(s, FLASH_TDECK);
-    } else if (y >= 444) {
+    } else if (x >= FLASH_BTN_X && x < FLASH_BTN_X + FLASH_BTN_W
+               && y >= MACHINE_BTN_Y && y < MACHINE_BTN_Y + FLASH_BTN_H) {
+        request_machine_switch(s);
+#ifdef CYBIKO_MACHINE_V1
+    } else if (x >= POWER_BTN_X && x < POWER_BTN_X + FLASH_BTN_W
+               && y >= MACHINE_BTN_Y && y < MACHINE_BTN_Y + FLASH_BTN_H) {
+        open_apps(s);
+        return;
+#endif
+    } else if (y >= 504) {
         close_settings(s);
         return;
     }
@@ -1545,6 +2651,10 @@ static void status_click(sdl_ctx_t *s, int x, int y) {
 
 static void menu_action(sdl_ctx_t *s, int item) {
     s->menu_open = false;
+#ifdef CYBIKO_MACHINE_V1
+    if (item == 1) { open_apps(s); return; }
+    if (item > 1) item--;
+#endif
     if (item == 0) open_settings(s);
     else if (item == 1) open_status(s);
     else if (item == 2) open_about(s);
@@ -1696,7 +2806,52 @@ static void press_hold(sdl_ctx_t *s, int col, uint16_t mask, bool down) {
     }
 }
 
+#define FN_LEAD 8   /* frames Fn is down before its letter: the Xtreme enters Fn mode only after several scans (Java emulator: 8) */
+
+static void fn_key_release(sdl_ctx_t *s, int i);
+
+#ifndef CYBIKO_MACHINE_V1
+static void fn_key_down(sdl_ctx_t *s, int col, uint16_t mask) {
+    for (int i = 0; i < 4; i++) {
+        if (s->fn_key[i].active) continue;
+        press_hold(s, FN_COL, FN_MASK, true);
+        s->fn_key[i].col = col;
+        s->fn_key[i].mask = mask;
+        s->fn_key[i].delay = FN_LEAD;
+        s->fn_key[i].up = false;
+        s->fn_key[i].active = true;
+        return;
+    }
+}
+
+static void fn_key_up(sdl_ctx_t *s, int col, uint16_t mask) {
+    for (int i = 0; i < 4; i++) {
+        if (!s->fn_key[i].active || s->fn_key[i].col != col || s->fn_key[i].mask != mask)
+            continue;
+        if (s->fn_key[i].delay > 0)
+            s->fn_key[i].up = true;   /* released before its letter went down */
+        else
+            fn_key_release(s, i);
+        return;
+    }
+}
+#endif
+
+static void fn_key_release(sdl_ctx_t *s, int i) {
+    press_hold(s, s->fn_key[i].col, s->fn_key[i].mask, false);
+    press_hold(s, FN_COL, FN_MASK, false);
+    s->fn_key[i].active = false;
+}
+
 static void tick_keys(sdl_ctx_t *s) {
+    for (int i = 0; i < 4; i++) {
+        if (!s->fn_key[i].active || s->fn_key[i].delay <= 0 || --s->fn_key[i].delay > 0)
+            continue;
+        press_hold(s, s->fn_key[i].col, s->fn_key[i].mask, true);
+        press_hold(s, FN_COL, FN_MASK, true);   /* Fn stays down as long */
+        if (s->fn_key[i].up)
+            fn_key_release(s, i);
+    }
     for (int i = 0; i < s->held_count; i++) {
         if (s->held_frames[i] > 0) s->held_frames[i]--;
         if (s->held_frames[i] <= 0 && s->held_release[i]) {
@@ -1716,10 +2871,23 @@ static void on_key(sdl_ctx_t *s, const SDL_KeyboardEvent *ev) {
             return;
         }
     }
+#ifndef CYBIKO_MACHINE_V1
+    for (size_t i = 0; i < sizeof FN_KEYS / sizeof FN_KEYS[0]; i++) {
+        if (FN_KEYS[i].sc == ev->keysym.scancode) {
+            if (down) fn_key_down(s, FN_KEYS[i].col, FN_KEYS[i].mask);
+            else fn_key_up(s, FN_KEYS[i].col, FN_KEYS[i].mask);
+            return;
+        }
+    }
+#endif
 }
 
 static void on_event(sdl_ctx_t *s, const SDL_Event *ev, bool *running) {
     int ix, iy;
+#ifdef CYBIKO_MACHINE_V1
+    if (apps_event(s, ev))
+        return;
+#endif
     Uint32 settings_id = s->settings_win ? SDL_GetWindowID(s->settings_win) : 0;
     Uint32 about_id = s->about_win ? SDL_GetWindowID(s->about_win) : 0;
     Uint32 status_id = s->status_win ? SDL_GetWindowID(s->status_win) : 0;
@@ -1963,21 +3131,43 @@ int main(int argc, char **argv) {
     }
     const char *boot_path = argv[1], *flash_path = argv[2];
     const char *nvram_path = NULL, *radio_path = NULL, *shell_arg = NULL;
+    const char *serial_spec = NULL, *serial_log_path = NULL, *link_arg = "47960";
     uint32_t cyid = 0x4C000001u;
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "--nvram") == 0 && i + 1 < argc) nvram_path = argv[++i];
         else if (strcmp(argv[i], "--radio") == 0 && i + 1 < argc) radio_path = argv[++i];
         else if (strcmp(argv[i], "--shell") == 0 && i + 1 < argc) shell_arg = argv[++i];
+        else if (strcmp(argv[i], "--serial") == 0 && i + 1 < argc) serial_spec = argv[++i];
+        else if (strcmp(argv[i], "--serial-log") == 0 && i + 1 < argc) serial_log_path = argv[++i];
+        else if (strcmp(argv[i], "--link") == 0 && i + 1 < argc) link_arg = argv[++i];
         else if (strcmp(argv[i], "--cyid") == 0 && i + 1 < argc)
             cyid = (uint32_t)strtoul(argv[++i], NULL, 16);
         else fprintf(stderr, "unknown option '%s'\n", argv[i]);
     }
 
+    /* Start the model that was running last (Settings > Machine) */
+    {
+        static sdl_ctx_t pre;
+        load_prefs(&pre);
+        pre.boot_path = boot_path;
+        pre.nvram_path = nvram_path;
+        pre.radio_arg = radio_path;
+        pre.cyid = cyid;
+        if (pre.machine_pref[0] && strcmp(pre.machine_pref, MACHINE_NAME) != 0
+            && find_other_machine(&pre)) {
+            fprintf(stderr, "last ran the %s: starting %s\n", OTHER_MACHINE, pre.switch_cmd[0]);
+            exec_other_machine(&pre);
+        }
+    }
+
     size_t boot_n = 0, flash_n = 0;
     uint8_t *boot = load_file(boot_path, &boot_n);
     uint8_t *flash = NULL;
+#ifdef CYBIKO_MACHINE_V1
+    /* the Classic's save is its whole flash chip */
     if (nvram_path)
         flash = load_file(nvram_path, &flash_n);
+#endif
     if (!flash)
         flash = load_file(flash_path, &flash_n);
     if (!boot || !flash) return 1;
@@ -2008,7 +3198,12 @@ int main(int argc, char **argv) {
     memset(&sdl, 0, sizeof sdl);
     sdl.mouse_col = -1;
     sdl.powered = true;
+    sdl.boot_path = boot_path;
+    sdl.nvram_path = nvram_path;
+    sdl.radio_arg = radio_path;
+    sdl.cyid = cyid;
     load_prefs(&sdl);
+    snprintf(sdl.machine_pref, sizeof sdl.machine_pref, "%s", MACHINE_NAME);
     sdl.app_icon = load_app_icon();
     if (sdl.app_icon)
         fprintf(stderr, "app icon %s\n", find_icon_png());
@@ -2101,7 +3296,7 @@ int main(int argc, char **argv) {
     } else if (shell_path) {
         fprintf(stderr, "shell '%s' failed, LCD only\n", shell_path);
     } else {
-        fprintf(stderr, "no img/cybiko.png, LCD only\n");
+        fprintf(stderr, "no img/" SHELL_FILE ", LCD only\n");
     }
     sdl.win_w = win_w;
     sdl.win_h = win_h;
@@ -2132,6 +3327,16 @@ int main(int argc, char **argv) {
     }
     free(boot);
     free(flash);
+#ifndef CYBIKO_MACHINE_V1
+    /* the Xtreme's save is its 2 MB RAM, which holds its file system */
+    if (nvram_path && file_ok(nvram_path)) {
+        size_t nv_n = 0;
+        uint8_t *nv = load_file(nvram_path, &nv_n);
+        if (nv && cybiko_load_nvram(emu, nv, nv_n))
+            fprintf(stderr, "loaded %s (%zu bytes)\n", nvram_path, nv_n);
+        free(nv);
+    }
+#endif
 
     static cybiko_serial_phy_t phy;
     static cybiko_lora_t link;
@@ -2167,14 +3372,47 @@ int main(int argc, char **argv) {
             sdl.coproc = &cop;
             cybiko_radio_coproc_init(&cop);
             cybiko_radio_coproc_set_transport(&cop, &link.base);
-            cybiko_attach_radio_id(emu, &cop, cyid);
+            attach_radio(emu, &cop, cyid);
             cybiko_serial_phy_request_status(&phy);
             sdl.radio_on = true;
             fprintf(stderr, "Radio on %s, CyID %08X\n", radio_path, (unsigned)cyid);
         }
     }
     cybiko_reset(emu);
+#ifdef CYBIKO_MACHINE_V1
+    cybiko_attach_serial(emu, serial_tx, NULL);
+    rb_con_init(&apps_con, link_put, emu);
+    if (strcmp(link_arg, "off") != 0)
+        link_open(emu, atoi(link_arg));
+#ifndef _WIN32
+    if (serial_log_path && !(serial_log = fopen(serial_log_path, "w")))
+        fprintf(stderr, "serial log %s: %s\n", serial_log_path, strerror(errno));
+    if (serial_spec)
+        serial_open(serial_spec);
+#else
+    if (serial_spec || serial_log_path)
+        fprintf(stderr, "--serial is for Linux\n");
+#endif
+#else
+    (void)link_arg;
+    if (serial_spec || serial_log_path)
+        fprintf(stderr, "--serial is for the Classic\n");
+#endif
     if (audio) SDL_PauseAudioDevice(audio, sdl.mute ? 1 : 0);
+
+    /* Test hooks for running headless (SDL_VIDEODRIVER=offscreen):
+     *   CYBIKO_SHOT=prefix       save the window as prefix_<frame>.bmp
+     *   CYBIKO_SHOT_EVERY=N      every N frames (default 600)
+     *   CYBIKO_QUIT_AT=N         quit at frame N
+     *   CYBIKO_KEYS=f:SCANCODE,... press that key at frame f (12 frames)
+     *   CYBIKO_OPEN_SETTINGS=1   open Settings; shots include it
+     *   CYBIKO_OPEN_APPS=text    open Apps searching for text; shots include it
+     *   CYBIKO_APPS_SEND=f, CYBIKO_APPS_RESTART=f   press those at frame f */
+    const char *shot = getenv("CYBIKO_SHOT");
+    int shot_every = getenv("CYBIKO_SHOT_EVERY") ? atoi(getenv("CYBIKO_SHOT_EVERY")) : 600;
+    int quit_at = getenv("CYBIKO_QUIT_AT") ? atoi(getenv("CYBIKO_QUIT_AT")) : 0;
+    const char *key_script = getenv("CYBIKO_KEYS");
+    int frame_no = 0;
 
     bool running = true;
     sdl.running = &running;
@@ -2194,6 +3432,80 @@ int main(int argc, char **argv) {
             cybiko_run_frame(emu);
             tick_keys(&sdl);
         }
+        frame_no++;
+        if (frame_no == 1 && getenv("CYBIKO_OPEN_SETTINGS"))
+            open_settings(&sdl);
+#ifdef CYBIKO_MACHINE_V1
+        if (frame_no == 1 && getenv("CYBIKO_OPEN_APPS")) {
+            open_apps(&sdl);
+            snprintf(apps_find, sizeof apps_find, "%s", getenv("CYBIKO_OPEN_APPS"));
+            lib_filter();
+            draw_apps(&sdl);
+        }
+        if (getenv("CYBIKO_APPS_SEND") && frame_no == atoi(getenv("CYBIKO_APPS_SEND"))) {
+            apps_send(&sdl);
+            draw_apps(&sdl);
+        }
+        if (getenv("CYBIKO_APPS_RESTART") && frame_no == atoi(getenv("CYBIKO_APPS_RESTART"))) {
+            apps_restart();
+            draw_apps(&sdl);
+        }
+#endif
+        if (key_script) {
+            for (const char *k = key_script; k && *k; k = strchr(k, ',') ? strchr(k, ',') + 1 : NULL) {
+                int at = atoi(k), sc = 0;
+                const char *c = strchr(k, ':');
+                if (c) sc = atoi(c + 1);
+                if (sc <= 0) continue;
+                SDL_KeyboardEvent ke = {0};
+                ke.keysym.scancode = (SDL_Scancode)sc;
+                if (frame_no == at) { ke.type = SDL_KEYDOWN; on_key(&sdl, &ke); }
+                if (frame_no == at + 12) { ke.type = SDL_KEYUP; on_key(&sdl, &ke); }
+            }
+        }
+        if (shot && shot_every > 0 && frame_no % shot_every == 0 && sdl.renderer) {
+            int w = 0, h = 0;
+            SDL_GetRendererOutputSize(sdl.renderer, &w, &h);
+            SDL_Surface *ss = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
+            if (ss && SDL_RenderReadPixels(sdl.renderer, NULL, SDL_PIXELFORMAT_ARGB8888,
+                                           ss->pixels, ss->pitch) == 0) {
+                char path[512];
+                snprintf(path, sizeof path, "%s_%06d.bmp", shot, frame_no);
+                SDL_SaveBMP(ss, path);
+            }
+            if (ss) SDL_FreeSurface(ss);
+#ifdef CYBIKO_MACHINE_V1
+            if (apps_ren) {
+                draw_apps(&sdl);
+                ss = SDL_CreateRGBSurfaceWithFormat(0, APPS_W, APPS_H, 32, SDL_PIXELFORMAT_ARGB8888);
+                if (ss && SDL_RenderReadPixels(apps_ren, NULL, SDL_PIXELFORMAT_ARGB8888,
+                                               ss->pixels, ss->pitch) == 0) {
+                    char path[512];
+                    snprintf(path, sizeof path, "%s_apps_%06d.bmp", shot, frame_no);
+                    SDL_SaveBMP(ss, path);
+                }
+                if (ss) SDL_FreeSurface(ss);
+            }
+#endif
+            if (sdl.settings_ren) {
+                ss = SDL_CreateRGBSurfaceWithFormat(0, SETTINGS_W, SETTINGS_H, 32, SDL_PIXELFORMAT_ARGB8888);
+                if (ss && SDL_RenderReadPixels(sdl.settings_ren, NULL, SDL_PIXELFORMAT_ARGB8888,
+                                               ss->pixels, ss->pitch) == 0) {
+                    char path[512];
+                    snprintf(path, sizeof path, "%s_settings_%06d.bmp", shot, frame_no);
+                    SDL_SaveBMP(ss, path);
+                }
+                if (ss) SDL_FreeSurface(ss);
+            }
+        }
+        if (quit_at && frame_no >= quit_at)
+            running = false;
+#ifdef CYBIKO_MACHINE_V1
+        serial_pump(emu);
+        rb_con_poll(&apps_con, 16);
+        link_pump();
+        apps_tick(&sdl);
+#endif
         if (sdl.radio_on) {
             link.base.pump(&link.base);
             if ((int32_t)(SDL_GetTicks() - radio_at) >= 0) {
@@ -2223,10 +3535,18 @@ int main(int argc, char **argv) {
             next = now;   /* fell behind: don't race to catch up */
     }
 
+    if (sdl.coproc)
+        fprintf(stderr, "radio: channel %u, sent %u, heard %u, dropped %u off-channel\n",
+                sdl.coproc->current_channel, sdl.coproc->stat_tx, sdl.coproc->stat_rx,
+                sdl.coproc->stat_off_channel);
     if (nvram_path) {
         size_t n = 0;
         uint32_t writes = 0;
+#ifdef CYBIKO_MACHINE_V1
         const uint8_t *img = cybiko_get_spi_flash(emu, &n, &writes);
+#else
+        const uint8_t *img = cybiko_get_nvram(emu, &n);
+#endif
         if (img && n) {
             FILE *f = fopen(nvram_path, "wb");
             if (f) {
@@ -2258,5 +3578,7 @@ int main(int argc, char **argv) {
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
+    if (sdl.switch_machine)
+        exec_other_machine(&sdl);
     return 0;
 }

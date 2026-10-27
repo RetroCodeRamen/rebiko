@@ -246,6 +246,7 @@ void bus_init(address_bus_t *bus)
     cybiko_sci2_init(&bus->sci2);
 #if CYBIKO_HAS_SPI_FLASH
     at45_init(&bus->spi_flash, NULL);
+    cybiko_uart_init(&bus->uart);
     bus->adc[0] = CYBIKO_ADC_DEFAULT_OTHER;
     bus->adc[1] = CYBIKO_ADC_DEFAULT_CH1;
     bus->adc[2] = CYBIKO_ADC_DEFAULT_CH2;
@@ -493,6 +494,13 @@ static uint8_t read_on_chip8(address_bus_t *bus, uint32_t address)
     if (address == 0xFFFF2E) return bus->ier;
     if (address == 0xFFFF2F) return bus->isr;
 
+#if CYBIKO_HAS_SPI_FLASH
+    if (bus->uart.bound) {
+        uint8_t uart_val;
+        if (cybiko_uart_read(&bus->uart, address, &uart_val))
+            return uart_val;
+    }
+#endif
     /* SCI2 SCR/SSR/RDR come from the co-processor once one is attached.
      * Until then SCI2 SSR stays transmit-ready, which is what CyOS boot sees. */
     if (bus->sci2.bound) {
@@ -683,6 +691,8 @@ static void write_on_chip8(address_bus_t *bus, uint32_t address, uint8_t value)
 #if CYBIKO_HAS_SPI_FLASH
         if (channel == 0 && bus->sci0.bound)
             cybiko_sci0_on_reg(&bus->sci0, reg, value);
+        if (channel == 2 && bus->uart.bound)
+            cybiko_uart_on_reg(&bus->uart, reg, value);
 #endif
 #if CYBIKO_HAS_SPI_FLASH
         if (channel == 1 && reg == 3) {          /* TDR: clock one byte */
@@ -1031,6 +1041,7 @@ void bus_tick_sci2(address_bus_t *bus, int cycles)
 {
 #if CYBIKO_HAS_SPI_FLASH
     cybiko_sci0_advance(&bus->sci0, cycles);
+    cybiko_uart_advance(&bus->uart, cycles);
 #else
     if (!bus->sci2.bound || cycles <= 0)
         return;

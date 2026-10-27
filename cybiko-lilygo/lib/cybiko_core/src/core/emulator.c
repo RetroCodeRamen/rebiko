@@ -224,6 +224,13 @@ void cybiko_reboot(cybiko_emu_t *emu) {
         emu->bus.sci0.tx_frames = 0;
         emu->bus.sci0.rx_injected = 0;
     }
+    if (emu->bus.uart.bound) {
+        emu->bus.uart.scr = 0;
+        emu->bus.uart.tdre = true;
+        emu->bus.uart.rdrf = false;
+        emu->bus.uart.txi_delay = 0;
+        emu->bus.uart.rx_tail = emu->bus.uart.rx_head;
+    }
 #endif
     init_peripherals(emu);
     h8s_cpu_reset(&emu->cpu);
@@ -465,6 +472,31 @@ void cybiko_attach_radio_id(cybiko_emu_t *emu, struct cybiko_radio_coproc *copro
                             uint32_t radio_id) {
     if (!emu) return;
     bus_attach_radio(&emu->bus, coproc, radio_id);
+}
+
+#if CYBIKO_HAS_SPI_FLASH
+static void serial_irq(void *ctx, int vector) {
+    cybiko_emu_t *emu = ctx;
+    h8s_cpu_request_interrupt(&emu->cpu, vector);
+}
+#endif
+
+void cybiko_attach_serial(cybiko_emu_t *emu, void (*tx)(void *user, uint8_t byte), void *user) {
+#if CYBIKO_HAS_SPI_FLASH
+    if (!emu) return;
+    cybiko_uart_bind(&emu->bus.uart, tx, user, serial_irq, emu);
+#else
+    (void)emu; (void)tx; (void)user;
+#endif
+}
+
+int cybiko_serial_put(cybiko_emu_t *emu, const uint8_t *data, int n) {
+#if CYBIKO_HAS_SPI_FLASH
+    return emu ? cybiko_uart_put(&emu->bus.uart, data, n) : 0;
+#else
+    (void)emu; (void)data;
+    return n;
+#endif
 }
 
 bool cybiko_v1_radio_status(const cybiko_emu_t *emu, cybiko_v1_radio_status_t *out) {

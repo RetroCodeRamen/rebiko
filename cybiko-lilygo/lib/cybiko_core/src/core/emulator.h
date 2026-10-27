@@ -22,6 +22,12 @@ void cybiko_attach_radio(cybiko_emu_t *emu, struct cybiko_radio_coproc *coproc);
 void cybiko_attach_radio_id(cybiko_emu_t *emu, struct cybiko_radio_coproc *coproc,
                             uint32_t radio_id);
 
+/* The Classic's serial port (SCI2, where CyberLoad talked to CyOS). tx
+ * gets each byte CyOS sends; cybiko_serial_put queues bytes for CyOS and
+ * returns how many fit. No-ops on the Xtreme, whose SCI2 is the radio. */
+void cybiko_attach_serial(cybiko_emu_t *emu, void (*tx)(void *user, uint8_t byte), void *user);
+int  cybiko_serial_put(cybiko_emu_t *emu, const uint8_t *data, int n);
+
 /* Classic radio progress, for logs and tests. False on the Xtreme. */
 typedef struct {
     bool radio_up;          /* CyOS has finished its first radio frame */

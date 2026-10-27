@@ -14,6 +14,7 @@
 #if CYBIKO_HAS_SPI_FLASH
 #include "at45db041.h"
 #include "sci0_v1.h"
+#include "uart_v1.h"
 #endif
 
 /* Forward declare CPU */
@@ -72,6 +73,8 @@ typedef struct address_bus {
     uint16_t adc[4];          /* 10-bit ADC results, channels 0-3 */
     /* V1 radio: SCI0 to the co-processor. Idle until bus_attach_radio(). */
     cybiko_sci0_v1_t sci0;
+    /* V1 serial port: SCI2. Idle until cybiko_attach_serial(). */
+    cybiko_uart_v1_t uart;
 #endif
 } address_bus_t;
 

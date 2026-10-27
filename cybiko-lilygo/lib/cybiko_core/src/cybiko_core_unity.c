@@ -16,6 +16,7 @@
 #include "core/keyboard.c"
 #include "core/at45db041.c"
 #include "core/cfs.c"
+#include "core/uart_v1.c"
 #include "core/h8s_cpu.c"
 #include "core/address_bus.c"
 #include "core/emulator.c"

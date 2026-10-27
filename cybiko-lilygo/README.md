@@ -135,6 +135,16 @@ The fields are messages heard, messages missed, last RSSI, last SNR, and seconds
 
 On the PC, run `../cybiko-c-emulator/build/modem_tool /dev/ttyUSB0 --seconds 600 --ping 1000` (ReBiko Desktop must be closed). It pings back and prints the same counts for the other direction every 5 s. Pings use channel 0, which CyOS never tunes, so CyOS never sees them. At SF7 the receiver stops decoding at about −7.5 dB SNR, so an SNR that gets near that is the edge of range.
 
+**Apps (Classic):** Apps go onto a running Cybiko and come off it over USB, with nothing restarted. ReBiko hands each app to CyOS's own serial console, the way CyberLoad loaded a real Cybiko, and reads files straight off the flash to copy them back. CyOS 1.2.46 lists a new app on its desktop only after it restarts, so send any number of apps, then restart CyOS once.
+
+    tools/rebiko_apps.py /dev/ttyACM0 ls                  # files and free room
+    tools/rebiko_apps.py /dev/ttyACM0 put game.app ...    # about 2 KB a second
+    tools/rebiko_apps.py /dev/ttyACM0 reboot              # CyOS restarts; new apps show
+    tools/rebiko_apps.py /dev/ttyACM0 get notes.dat [out]
+    tools/rebiko_apps.py /dev/ttyACM0 rm game.app
+
+The tool needs pyserial. Without a port it talks to ReBiko Desktop instead (`127.0.0.1:47960`). ReBiko Desktop also has an **Apps** window (right-click menu, or Settings > Apps). It lists the `Apps/` library next to `roms/` by folder, filtered as you type, beside the Cybiko's files and free room. Its buttons are Send, Restart CyOS, Delete and Copy to PC (into `Apps/From Cybiko/`). The commands, and the console protocol read from CyOS's code, are in `cybiko-emu/rebiko_apps.h`. The Xtreme is not covered yet: it loaded apps over its USB chip with a different program.
+
 ## Project Structure
 
 ```

@@ -28,6 +28,7 @@ extern "C" {
 #include "rebiko_config.h"
 #include "rebiko_input.h"
 #include "rebiko_menu.h"
+#include "rebiko_apps.h"
 
 #ifndef REBIKO_VERSION
 #define REBIKO_VERSION "dev"   // tools/version.py sets it from ../VERSION
@@ -360,7 +361,10 @@ static void press_tap(const tap_t *t) {
         pending_fn.letter_col = ev->fn_col;
         pending_fn.letter_mask = ev->fn_mask;
         pending_fn.phys = t->phys;
-        pending_fn.delay_frames = 3;
+        // The Xtreme enters Fn mode only after Fn has been seen across
+        // several scans: with 3 frames, Fn+Q typed q (ReBiko Desktop test,
+        // 26 Oct 2026); 8 is the Java emulator's lead
+        pending_fn.delay_frames = 8;
         fn_pending = true;
     } else {
         if (ev->needs_shift)
@@ -400,6 +404,7 @@ static void keyboard_tick_frame(void) {
         pending_fn.delay_frames--;
         if (pending_fn.delay_frames <= 0) {
             press_key_ex(pending_fn.letter_col, pending_fn.letter_mask, pending_fn.phys, true);
+            press_key_ex(TDECK_FN_COL, TDECK_FN_MASK, -1, true);   // Fn stays down as long
             fn_pending = false;
         }
     }
@@ -705,6 +710,64 @@ static void keyboard_task(void *arg) {
     }
 }
 
+#ifdef CYBIKO_MACHINE_V1
+// Apps on and off the Cybiko over USB (tools/rebiko_apps.py). CyOS's own
+// serial console takes each app while it runs; files come off by reading
+// the flash image. A link command line starts with RB_LINK_START; a put's
+// bytes follow its line. Everything else on the port stays keys.
+static rb_con_t apps_con;
+static rb_link_t apps_link;
+static bool link_line;
+
+static void apps_tx(void *user, uint8_t byte) {
+    (void)user;
+    rb_con_rx(&apps_con, byte);
+}
+
+static int apps_put(void *ctx, const uint8_t *data, int n) {
+    return cybiko_serial_put((cybiko_emu_t *)ctx, data, n);
+}
+
+static void apps_send(void *ctx, const uint8_t *data, size_t n) {
+    (void)ctx;
+    // A get may be large; the tool is reading, so let writes wait for it
+    Serial.setTxTimeoutMs(1000);
+    Serial.write(data, n);
+    Serial.setTxTimeoutMs(0);
+}
+
+static const uint8_t *apps_flash(void *ctx, size_t *len) {
+    uint32_t writes;
+    return cybiko_get_spi_flash((cybiko_emu_t *)ctx, len, &writes);
+}
+
+static void *apps_alloc(size_t n) { return ps_malloc(n); }
+
+static void apps_setup(cybiko_emu_t *e) {
+    cybiko_attach_serial(e, apps_tx, NULL);
+    rb_con_init(&apps_con, apps_put, e);
+    rb_link_init(&apps_link, &apps_con);
+    apps_link.send = apps_send;
+    apps_link.ctx = e;
+    apps_link.flash = apps_flash;
+    apps_link.alloc = apps_alloc;
+    apps_link.release = free;
+}
+
+// True when the byte belongs to the link, not the keyboard
+static bool apps_serial_byte(int c) {
+    if (!link_line && !rb_link_receiving(&apps_link) && c != RB_LINK_START)
+        return false;
+    uint8_t b = (uint8_t)c;
+    if (c == RB_LINK_START)
+        link_line = true;
+    else if (link_line && c == '\n')
+        link_line = false;
+    rb_link_rx(&apps_link, &b, 1);
+    return true;
+}
+#endif
+
 static void send_screenshot(void) {
     static const char DIGITS[] = "0123456789ABCDEF";
     char line[2 * 160 + 1];
@@ -738,9 +801,14 @@ static void poll_input(void) {
     // key mode sent it ($ prefix included), 0x11-0x14 for trackball
     // up/down/left/right, 0x15 Mic, 0x16 a ball click, 0x17 a ball hold.
     // 0x18 prints the Cybiko screen: "SHOT " and 16000 hex bytes, the
-    // 160x100 grey levels last drawn (tools/tdeck_shot.py).
+    // 160x100 grey levels last drawn (tools/tdeck_shot.py). 0x19 starts an
+    // app link command on the Classic (tools/rebiko_apps.py).
     while (Serial.available() > 0) {
         int c = Serial.read();
+#ifdef CYBIKO_MACHINE_V1
+        if (apps_serial_byte(c))
+            continue;
+#endif
         switch (c) {
         case 0x11: rb_router_ball(&router, RB_PK_BALL_UP, true); break;
         case 0x12: rb_router_ball(&router, RB_PK_BALL_DOWN, true); break;
@@ -1718,6 +1786,9 @@ static void menu_frame(void) {
 }
 
 void setup() {
+    // Room for one app link chunk (RB_LINK_CHUNK) and its command line; the
+    // default 256 bytes dropped most of an app sent in one go
+    Serial.setRxBufferSize(4096);
     Serial.begin(115200);
     // Never wait on the USB host. HWCDC switches to a 100 ms timeout once a
     // host has been seen; after unplugging, or with the cable in and no
@@ -2038,6 +2109,9 @@ void setup() {
 
     tdeck_battery_poll();
     cybiko_reset(emu);
+#ifdef CYBIKO_MACHINE_V1
+    apps_setup(emu);
+#endif
 
     // Init DMA after SD card operations are complete (shared SPI bus)
 #ifdef CYBIKO_DIAG_SPI
@@ -2171,6 +2245,10 @@ void loop() {
         tft.dmaWait();
     cybiko_sx1262_pump();
     cybiko_run_frame(emu);
+#ifdef CYBIKO_MACHINE_V1
+    rb_con_poll(&apps_con, 16);
+    rb_link_poll(&apps_link);
+#endif
     // Time blocked on the audio queue is pacing, not emulation
     frame_us += micros() - t0 - audio_wait_us;
     pace_wait_us += audio_wait_us;
