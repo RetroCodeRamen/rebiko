@@ -7,24 +7,28 @@
 <p align="center"><em>Original CyOS. New hardware. Back on the air.</em></p>
 
 <p align="center">
-  <strong>v1.1026.4b (beta)</strong> · October 2026 ·
-  <a href="https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1026.4b">Linux &amp; Windows builds</a>
+  <strong>v1.1027.1b (beta)</strong> · October 2026 ·
+  <a href="https://github.com/RetroCodeRamen/rebiko/releases/tag/v1.1027.1b">Linux .deb &amp; zip</a>
 </p>
 
 <p align="center">
-  <img src="img/pc/shell-blue.png" alt="ReBiko Desktop running CyOS 1.2.46" width="280">
+  <img src="img/pc/shell-blue.png" alt="ReBiko Desktop, the Cybiko Classic" width="240">
+  &nbsp;
+  <img src="img/pc/xt-desktop.png" alt="ReBiko Desktop, the Cybiko Xtreme" width="240">
 </p>
+
+<p align="center"><sub>Classic · Xtreme</sub></p>
 
 ---
 
 In 2001 you could buy a little blue handheld with a real OS, a tiny keyboard, and a radio that talked to the kid across the cafeteria. No account. No tower. Just CyOS and whoever was in range.
 
-ReBiko does not recreate that vibe in a web app. **It boots the original CyOS.** Hitachi H8S, AT45 flash, the same keyboard matrix, the same chat — on a LilyGO T-Deck in your bag, or as a borderless Classic on your desktop with a Heltec as the radio dongle. LoRa is the transport under the old Cybiko radio, not a new protocol pretending to be one.
+ReBiko does not recreate that vibe in a web app. **It boots the original CyOS.** Hitachi H8S, AT45 flash, the same keyboard matrix, the same chat — on a LilyGO T-Deck in your bag, or as a borderless Classic or Xtreme on your desktop with a Heltec as the radio dongle. LoRa is the transport under the old Cybiko radio, not a new protocol pretending to be one.
 
 Three pieces:
 
-- **ReBiko Desktop** — a Cybiko Classic on your PC (Linux and Windows)
-- **ReBiko Pocket** — a LilyGO T-Deck that *is* a Cybiko Classic
+- **ReBiko Desktop** — a Cybiko Classic or Xtreme on your PC (Linux and Windows)
+- **ReBiko Pocket** — a LilyGO T-Deck that *is* a Cybiko, Classic or Xtreme
 - **ReBiko Radio** — a Heltec V3 on USB, the radio for ReBiko Desktop
 
 > Original guest. Modern hardware. Same cafeteria energy, slightly better RSSI.
@@ -65,7 +69,7 @@ Omit `--radio` and the PC side attaches the first Heltec it sees.
 
 ## ReBiko Desktop
 
-The PC emulator: a borderless photo of a Cybiko Classic. Inside the LCD, unmodified CyOS 1.2.46 is running. A Heltec V3 on USB is the radio.
+The PC emulator: a borderless photo of a Cybiko. Inside the LCD, unmodified CyOS is running — 1.2.46 or 1.2.57 on the Classic, 1.5.08 on the Xtreme. A Heltec V3 on USB is the radio. Settings → **Xtreme** (or **Classic**) switches shells, and the one you used last is the one that starts. The Xtreme's ROMs are not in the download.
 
 <p align="center">
   <img src="img/pc/cyos-loading.png" alt="CyOS 1.2.46 loading" width="240">
@@ -75,7 +79,17 @@ The PC emulator: a borderless photo of a Cybiko Classic. Inside the LCD, unmodif
   <img src="img/pc/cyos-you-and-me.png" alt="You &amp; Me" width="240">
 </p>
 
-<p align="center"><sub>Boot splash · Main Desktop · You &amp; Me</sub></p>
+<p align="center"><sub>Classic — boot splash · Main Desktop · You &amp; Me</sub></p>
+
+The Xtreme is the same window with the silver shell and CyOS 1.5.08.
+
+<p align="center">
+  <img src="img/pc/xt-loading.png" alt="CyOS 1.5.08 loading on the Xtreme" width="240">
+  &nbsp;
+  <img src="img/pc/xt-desktop.png" alt="CyOS 1.5.08 Main Desktop on the Xtreme" width="240">
+</p>
+
+<p align="center"><sub>Xtreme — Loading CyOS 1.5.08 · Main Desktop</sub></p>
 
 ### Run it
 
@@ -151,6 +165,7 @@ Right-click the Classic → **Settings**.
 | **4× zoom** | LCD only, pixel-doubled. Drag to move that window |
 | **Reboot** | Cold-boots CyOS. Saved flash stays; RAM does not |
 | **Power off / on** | Blanks the LCD and stops the guest; power-on boots again |
+| **Xtreme / Classic** | Quits this shell and starts the other. Each model keeps its own save |
 | **Flash Heltec** | Uploads ReBiko Radio to the detected CP2102 (needs PlatformIO) |
 | **Flash T-Deck** | Uploads ReBiko Pocket to `/dev/ttyACM0` (needs PlatformIO) |
 
@@ -158,7 +173,7 @@ Preferences live in `~/.config/cybiko/v1_emu.conf` (Linux) or `%APPDATA%\cybiko\
 
 ### Shell colors
 
-The photo is the original blue Classic. Neon and Purple recolor only the dyed plastic — keys, labels, and lighting stay.
+The photo is the original blue Classic. Neon and Purple recolor only the dyed plastic — keys, labels, and lighting stay. The Xtreme shell is the silver body above, and it is not recolored.
 
 <p align="center">
   <img src="img/pc/shells.png" alt="Blue, Neon, and Purple shells" width="720">
@@ -182,11 +197,45 @@ Right-click → **Status**. This is the radio health panel, not a CyOS screen.
 
 ---
 
+## ReBiko Pocket
+
+A LilyGO T-Deck that *is* the Cybiko: the original CyOS on its screen, its QWERTY keyboard as the Cybiko's, the trackball as the D-pad, and its LoRa radio as the Cybiko radio. One T-Deck carries both models. The green line on top is ReBiko's own: frame rate, battery voltage and charge.
+
+<p align="center">
+  <img src="img/lilgochatmenu.jpg" alt="The Classic's Main Desktop on a T-Deck, Chat highlighted" width="560">
+</p>
+
+<p align="center"><sub>The Classic's Main Desktop, Chat highlighted</sub></p>
+
+<p align="center">
+  <img src="img/lilygolostgame.jpg" alt="Lost in Labyrinth on the Classic" width="240">
+  &nbsp;
+  <img src="img/lilgoxboot.jpg" alt="The Xtreme loading CyOS 1.5.08" width="240">
+  &nbsp;
+  <img src="img/lilygoxdesktop.jpg" alt="The Xtreme's Main Desktop" width="240">
+</p>
+
+<p align="center"><sub>Lost in Labyrinth on the Classic · the Xtreme loading CyOS 1.5.08 · the Xtreme's desktop</sub></p>
+
+`$` then Mic opens the ReBiko menu: key remapping, CPU mode, display, audio, and **System → Machine**, which saves and restarts into the other model.
+
+<p align="center">
+  <img src="img/rebikomenu.jpg" alt="The ReBiko menu" width="240">
+  &nbsp;
+  <img src="img/rebikomenuSwitch.jpg" alt="Switching to the Xtreme" width="240">
+</p>
+
+<p align="center"><sub>The ReBiko menu · switching to the Xtreme</sub></p>
+
+Flashing, the SD card layout and the keyboard are in [cybiko-lilygo/README.md](cybiko-lilygo/README.md).
+
+---
+
 ## What you actually get
 
 | Piece | Role |
 | --- | --- |
-| **ReBiko Desktop** | Borderless photo shell, original CyOS (1.2.46, or 1.2.57 after Cybiko's System Pack update), Heltec as the air interface |
+| **ReBiko Desktop** | Borderless Classic or Xtreme shell. Classic CyOS 1.2.46 or 1.2.57, Xtreme CyOS 1.5.08. Heltec as the air interface |
 | **ReBiko Pocket** | T-Deck handheld that *is* the Cybiko — keyboard, LCD, trackball, LoRa, battery |
 | **ReBiko Radio** | Heltec V3 USB SLIP modem so the PC can share the same 915 MHz channel |
 
