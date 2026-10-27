@@ -10,13 +10,21 @@
  * Commands: 0x57 status, 0x52 main memory page read, 0x60 compare page
  * with buffer 1, 0x82 program a page through buffer 1 (committed when CS
  * goes high).
+ *
+ * The Classic shipped with the 512 KB AT45DB041; this is its 1 MB sibling,
+ * the AT45DB081: the same 264-byte pages, twice as many, one more page
+ * address bit, density code 4. CyOS 1.2.46 reads the code ("Detected
+ * flash device model 4 [4091 blocks]") and uses all of it, so a full
+ * Cylandia (166 KB) fits beside the stock files. A 512 KB image loads
+ * into the first half; at45_format_free() makes the rest empty blocks.
  */
 
 #include "types.h"
 
-#define AT45_PAGES     2048
+#define AT45_PAGES     4096
 #define AT45_PAGE_SIZE 264
-#define AT45_SIZE      (AT45_PAGES * AT45_PAGE_SIZE)   /* 540672 */
+#define AT45_SIZE      (AT45_PAGES * AT45_PAGE_SIZE)   /* 1081344 */
+#define AT45_DB041_SIZE 540672                         /* the factory chip */
 
 typedef struct {
     uint8_t *data;                    /* AT45_SIZE bytes, owned by the emulator */
@@ -39,5 +47,9 @@ void    at45_init(at45db041_t *f, uint8_t *data);
 void    at45_cs(at45db041_t *f, bool selected);
 /* One full-duplex byte. Returns MISO. */
 uint8_t at45_transfer(at45db041_t *f, uint8_t mosi);
+
+/* Write pages first..AT45_PAGES-1 as empty file blocks, checksummed as
+ * CyOS checks them */
+void at45_format_free(uint8_t *data, int first);
 
 #endif

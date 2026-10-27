@@ -11,7 +11,7 @@
 
 #define STATUS_READY     0x80
 #define STATUS_MISMATCH  0x40
-#define DEVICE_ID_BITS   0x18   /* AT45DB041 density code in bits 5:3 */
+#define DEVICE_ID_BITS   0x20   /* AT45DB081 density code (4) in bits 5:3 */
 
 void at45_init(at45db041_t *f, uint8_t *data) {
     memset(f, 0, sizeof(*f));
@@ -22,7 +22,7 @@ void at45_init(at45db041_t *f, uint8_t *data) {
 
 /* 11-bit page address and 9-bit byte address from the command bytes */
 static int page_addr(const at45db041_t *f) {
-    return ((f->cmd[1] & 0x0F) << 7) | ((f->cmd[2] & 0xFE) >> 1);
+    return ((f->cmd[1] & 0x1F) << 7) | ((f->cmd[2] & 0xFE) >> 1);
 }
 
 static int byte_addr(const at45db041_t *f) {
@@ -106,4 +106,34 @@ uint8_t at45_transfer(at45db041_t *f, uint8_t mosi) {
         f->prog_pos = (f->prog_pos + 1) % AT45_PAGE_SIZE;
     }
     return 0;
+}
+
+/* A page is an 8-byte header (CRC-32 of the 254 bytes after it, big-endian;
+ * a write count; a check word over the first six header bytes), 256 bytes
+ * of block and a 2-byte trailer. An empty block has bit 7 of its first
+ * byte clear. Checked against every empty page of flash_v1246.bin. */
+static uint32_t at45_crc32(const uint8_t *p, size_t n) {
+    uint32_t crc = 0xFFFFFFFFu;
+    while (n--) {
+        crc ^= *p++;
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1)));
+    }
+    return ~crc;
+}
+
+void at45_format_free(uint8_t *data, int first) {
+    uint8_t page[AT45_PAGE_SIZE];
+    memset(page, 0xFF, sizeof page);
+    page[8] = 0x7F;
+    page[4] = page[5] = 0;
+    uint32_t crc = at45_crc32(page + 8, AT45_PAGE_SIZE - 10);
+    page[0] = (uint8_t)(crc >> 24); page[1] = (uint8_t)(crc >> 16);
+    page[2] = (uint8_t)(crc >> 8);  page[3] = (uint8_t)crc;
+    unsigned v = 0xAF17u ^ ((unsigned)page[0] << 8 | page[1])
+               ^ ((unsigned)page[2] << 8 | page[3]) ^ ((unsigned)page[4] << 8 | page[5]);
+    page[6] = (uint8_t)v;               /* byte-swapped */
+    page[7] = (uint8_t)(v >> 8);
+    for (int p = first; p < AT45_PAGES; p++)
+        memcpy(data + (size_t)p * AT45_PAGE_SIZE, page, AT45_PAGE_SIZE);
 }

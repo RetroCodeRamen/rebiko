@@ -182,9 +182,13 @@ bool cybiko_load_boot_rom(cybiko_emu_t *emu, const uint8_t *data, size_t len) {
 
 bool cybiko_load_flash_rom(cybiko_emu_t *emu, const uint8_t *data, size_t len) {
 #if CYBIKO_HAS_SPI_FLASH
-    /* V1: the image is the AT45DB041 contents (flash_v1246.bin, 540672 bytes) */
+    /* V1: the image is the flash chip's contents: flash_v1246.bin or an old
+     * save (540672 bytes, the AT45DB041) fills the first half, the rest
+     * becomes empty blocks; a save from the larger chip fills all of it */
     if (len > AT45_SIZE) len = AT45_SIZE;
     memcpy(emu->spi_flash, data, len);
+    if (len < AT45_SIZE)
+        at45_format_free(emu->spi_flash, (int)(len / AT45_PAGE_SIZE));
     bus_load_spi_flash(&emu->bus, emu->spi_flash);
 #else
     memory_load(&emu->bus.flash_rom, data, len, 0);
@@ -323,7 +327,7 @@ void cybiko_run_frame(cybiko_emu_t *emu) {
 #ifdef CYBIKO_KEY_IRQ_VECTOR
     /* V1 scans the matrix from IRQ2. Radio SCAN can eat the press-edge
      * frame; without a retry CyOS never looks again and the key is lost. */
-    {
+    if ((bus_read32(&emu->bus, CYBIKO_KEY_IRQ_HOOK) & 0xFFFFFF) >= 0x200000) {
         bool edge = false, down = false;
         for (int i = 0; i < CYBIKO_KEYBOARD_SCAN_COLS; i++) {
             if (emu->keyboard.columns[i] & ~emu->prev_keys[i])

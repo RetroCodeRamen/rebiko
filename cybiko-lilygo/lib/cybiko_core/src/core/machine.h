@@ -93,6 +93,10 @@
 
 /* Key press raises IRQ2 (vector 18); CyOS scans the matrix in its ISR */
 #define CYBIKO_KEY_IRQ_VECTOR      18
+/* The boot ROM's IRQ2 entry jumps through this word. CyOS 1.2.46 points
+ * it at its key handler; 1.2.57 leaves the ROM stub there and polls the
+ * keys instead, and a stray IRQ2 stops its scan for good. */
+#define CYBIKO_KEY_IRQ_HOOK        0xFFEC18
 
 /* ADC battery channels, 10-bit. CyOS 1.2.46 needs ch1 - ch2 > 15 to pass
  * its battery check (bug #14); these are the Java emulator's values. */
