@@ -88,20 +88,22 @@ Each item names what done means. Host tests are not a substitute for the air che
    - **Xtreme:** the host writer and the card scan exist (`/cybiko/apps/*.app` into `save.nvram`). CyOS does not list an injected app yet, and the Xtreme loaded apps over its USB chip, not the console.
    - A picker for the T-Deck from the PC (today it is `rebiko_apps.py` by name).
 
-4. **Radio settings on the Pocket.** The `$` Mic menu covers keys, CPU, display, and audio. It does not change frequency, spreading factor, bandwidth, power, or CyID, and it does not pick a ROM. Done when a change hits the SX1262 registers and is still there after reboot.
+4. **Group encryption (decided 28 Oct 2026, not started).** Keeps casual listeners out; not military grade. Open by default: with no key set, packets go out exactly as today. With a group passphrase set (ReBiko menu on the T-Deck, Settings on the Desktop; the Heltec is unchanged because the PC encrypts before the modem), the link layer (`radio_link.c`) encrypts and authenticates the whole packet with ChaCha20-Poly1305 from Monocypher (one public-domain C file, builds everywhere), key from the passphrase through Argon2. Only a 1-byte key id and an 8-byte nonce (per-boot random + counter) stay in the clear; sender, message id, channel and fragment fields go inside, so a wrong-key packet is dropped at once and a forged or tampered one fails the tag. The per-sender counter rejects replays. About 25 bytes more per packet (a 200-byte Chat frame becomes ~241 of 255; the tag can be cut to 8 bytes if airtime matters). Link version 3: units update together. Switching groups is switching keys; Chat rooms still work inside a group, and the internet relay can forward packets it cannot read. Note in the docs: fine on 915 MHz under Part 15, not allowed on amateur bands. Done when the Desktop and a T-Deck chat on one key, a third unit on another key or none hears nothing, and no key behaves as today.
 
-5. **Desktop leftovers.**
+5. **Radio settings on the Pocket.** The `$` Mic menu covers keys, CPU, display, and audio. It does not change frequency, spreading factor, bandwidth, power, or CyID, and it does not pick a ROM. Done when a change hits the SX1262 registers and is still there after reboot.
+
+6. **Desktop leftovers.**
    - A flash pack that does not need PlatformIO installed.
    - Click-through on the shaped window under native Windows. Linux already lets clicks on empty pixels pass through.
 
-6. **Battery passthrough.** Blocked. The details are under [Battery gauge](#battery-gauge). Done when the T-Deck's LiPo drives CyOS's own gauge, CyOS still idles, and the radio still sends.
+7. **Battery passthrough.** Blocked. The details are under [Battery gauge](#battery-gauge). Done when the T-Deck's LiPo drives CyOS's own gauge, CyOS still idles, and the radio still sends.
 
-7. **Xtreme, besides the switch and the cross-chat.** CyOS 1.5.08 is still not the product. The menu switch does not make these done:
+8. **Xtreme, besides the switch and the cross-chat.** CyOS 1.5.08 is still not the product. The menu switch does not make these done:
    - A CyOS frame from an Xtreme T-Deck received on the PC, then discovery and chat both ways. A raw ping is not this.
    - Two Xtremes chatting over LoRa.
    - The XT battery reading on Port A. The Classic gauge workaround does not cover it.
 
-8. **Internet relay.** On hold. The design is below. Do not start it ahead of two T-Decks in Chat.
+9. **Internet relay.** On hold. The design is below. Do not start it ahead of two T-Decks in Chat.
 
 ## Internet relay
 
