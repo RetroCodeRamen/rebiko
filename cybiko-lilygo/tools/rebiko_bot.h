@@ -112,6 +112,10 @@ bool rb_chat_line(const uint8_t *frame, size_t len, uint8_t *channel, uint32_t *
                   char *text, size_t cap);
 /* For tests: an LLM reply cut to what the Classic can type, up to max */
 void rb_bot_clean(const char *in, char *out, size_t max);
+#define RB_LINE 60          /* what one Chat line holds */
+#define RB_LOOKUP_LINES 3   /* lines for an answer looked up on Wikipedia */
+/* A reply cleaned and broken at spaces into up to max_lines Chat lines */
+int rb_bot_split(const char *in, char lines[][RB_LINE + 1], int max_lines);
 
 #ifdef __cplusplus
 }

@@ -2513,6 +2513,10 @@ static void llm_tick(sdl_ctx_t *s) {
     }
     if (!llm_win) return;
     const char *now[3] = { rb_bot_status(llm_bot), rb_bot_heard(llm_bot), rb_bot_said(llm_bot) };
+    if (llm_msg_kind == 1 && strstr(now[0], "listening") && strstr(llm_msg, "starting")) {
+        llm_msg[0] = 0;   /* it is in the room: the start-up note is done */
+        redraw = true;
+    }
     for (int i = 0; i < 3; i++)
         if (strcmp(now[i], llm_shown[i]) != 0) {
             snprintf(llm_shown[i], sizeof llm_shown[i], "%s", now[i]);

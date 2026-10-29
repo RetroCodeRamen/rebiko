@@ -388,9 +388,98 @@ void rb_bot_clean(const char *in, char *out, size_t max) {
     out[n] = 0;
 }
 
+int rb_bot_split(const char *in, char lines[][RB_LINE + 1], int max_lines) {
+    char all[RB_LINE * 4 + 1];
+    size_t cap = (size_t)RB_LINE * (size_t)max_lines;
+    if (cap > sizeof all - 1) cap = sizeof all - 1;
+    rb_bot_clean(in, all, cap);
+    const char *p = all;
+    int n = 0;
+    while (*p && n < max_lines) {
+        size_t k = strlen(p);
+        if (k > RB_LINE) {   /* break at the last space that fits */
+            k = RB_LINE;
+            while (k > RB_LINE / 2 && p[k] != ' ') k--;
+            if (p[k] != ' ') k = RB_LINE;
+        }
+        memcpy(lines[n], p, k);
+        lines[n][k] = 0;
+        n++;
+        p += k;
+        while (*p == ' ') p++;
+    }
+    return n;
+}
+
+/* ---- Wikipedia, for lines that start with '?' ---- */
+
+/* The question in a Chat line, or NULL. The '?' may come second: a
+ * Cybiko's first key into a filled-in line is sometimes kept ("x? ...") */
+static const char *question(const char *line) {
+    if (line[0] && line[0] != '?' && line[1] == '?') line++;
+    if (line[0] != '?') return NULL;
+    line++;
+    while (*line == ' ') line++;
+    return *line ? line : NULL;
+}
+
+/* The intros of the best Wikipedia articles for q, as "Title: text" lines.
+ * Through the curl program: Wikipedia is HTTPS only. Everything but
+ * letters, digits and -._~ is %-encoded, so nothing in q reaches the shell. */
+static bool wiki_notes(const char *q, char *out, size_t cap, char *err, size_t ecap) {
+    char enc[400], cmd[800];
+    size_t n = 0;
+    for (; *q && n + 4 < sizeof enc; q++) {
+        unsigned char c = (unsigned char)*q;
+        if (isalnum(c) || c == '-' || c == '.' || c == '_' || c == '~') enc[n++] = (char)c;
+        else n += (size_t)snprintf(enc + n, sizeof enc - n, "%%%02X", c);
+    }
+    enc[n] = 0;
+    snprintf(cmd, sizeof cmd,
+             "curl -s --max-time 12 -A \"ReBiko/1.0 (https://github.com/RetroCodeRamen/rebiko)\" "
+             "\"https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=%s"
+             "&gsrlimit=2&prop=extracts&exintro=1&explaintext=1&exchars=700&redirects=1"
+             "&format=json&formatversion=2\"", enc);
+    FILE *f = popen(cmd, "r");
+    if (!f) {
+        snprintf(err, ecap, "Cannot run curl for Wikipedia");
+        return false;
+    }
+    size_t bn = 0, bcap = 16384;
+    char *body = malloc(bcap + 1);
+    size_t r;
+    while (body && (r = fread(body + bn, 1, bcap - bn, f)) > 0) {
+        bn += r;
+        if (bn == bcap) break;
+    }
+    pclose(f);
+    if (!body || !bn) {
+        snprintf(err, ecap, "No answer from Wikipedia (is curl installed, the PC online?)");
+        free(body);
+        return false;
+    }
+    body[bn] = 0;
+    /* each page: "title", then "extract" */
+    size_t o = 0;
+    const char *p = body;
+    char title[120], text[800];
+    out[0] = 0;
+    while ((p = json_string(p, "title", title, sizeof title)) != NULL) {
+        const char *e = json_string(p, "extract", text, sizeof text);
+        if (!e) break;
+        o += (size_t)snprintf(out + o, o < cap ? cap - o : 0, "%s: %s\n", title, text);
+        p = e;
+    }
+    free(body);
+    if (!out[0]) {
+        snprintf(err, ecap, "Wikipedia has nothing on that");
+        return false;
+    }
+    return true;
+}
+
 /* ---- the bot ---- */
 
-#define BOT_LINE_MAX 60      /* what one Chat line holds */
 #define BOT_HISTORY 8
 #define BOT_GAP_MS 2500      /* between one reply and the next */
 /* A tap: Shift down BOT_SHIFT frames before the key and up BOT_SHIFT after
@@ -444,7 +533,8 @@ struct rb_bot {
     SDL_Thread *thread;
     SDL_atomic_t job_done;
     bool job_running;
-    char job_body[6000];
+    char job_body[9000];
+    char job_q[160];        /* a '?' question: looked up on the worker */
     char job_out[600], job_err[160];
     char status[200], heard[200], said[200];
 };
@@ -613,10 +703,42 @@ static void heard(void *user, int port, const uint8_t *data, size_t len, uint8_t
     b->pending = true;
 }
 
+/* The model's request for a looked-up question: the notes in, only the
+ * question asked (the chat history would only pull it off them) */
+static void lookup_body(rb_bot_t *b, const char *notes) {
+    char sys[3200], esc[3600], qe[400];
+    snprintf(sys, sizeof sys,
+             "You are %s, a goofy 14-year-old in the year 2000, chatting on your Cybiko. Your "
+             "Cybiko has a magic web link that just looked this up on Wikipedia:\n%s\n"
+             "Answer the question using ONLY these notes, in %s's voice, in at most 2 short "
+             "sentences (under %d characters in all). If the notes do not answer it, say your "
+             "web link came up empty. Plain text: no emoji, no lists, no quotes.",
+             b->nick, notes, b->nick, RB_LINE * RB_LOOKUP_LINES - 10);
+    json_escape(sys, esc, sizeof esc);
+    json_escape(b->job_q, qe, sizeof qe);
+    snprintf(b->job_body, sizeof b->job_body,
+             "{\"model\":\"%s\",\"stream\":false,\"keep_alive\":\"30m\","
+             "\"options\":{\"num_predict\":90,\"temperature\":0.3},"
+             "\"messages\":[{\"role\":\"system\",\"content\":\"%s\"},"
+             "{\"role\":\"user\",\"content\":\"%s\"}]}",
+             b->model, esc, qe);
+}
+
 static int chat_worker(void *arg) {
     rb_bot_t *b = arg;
     char *body = NULL;
     b->job_out[0] = b->job_err[0] = 0;
+    if (b->job_q[0]) {
+        char notes[2000];
+        if (!wiki_notes(b->job_q, notes, sizeof notes, b->job_err, sizeof b->job_err)) {
+            /* tell the room, in character */
+            snprintf(b->job_out, sizeof b->job_out, "Dude, my web link came up empty on that one.");
+            b->job_err[0] = 0;
+            SDL_AtomicSet(&b->job_done, 1);
+            return 0;
+        }
+        lookup_body(b, notes);
+    }
     int st = http(b->server, "POST", "/api/chat", b->job_body, &body, b->job_err, sizeof b->job_err);
     if (st == 200 && body) {
         const char *m = strstr(body, "\"message\"");
@@ -642,7 +764,7 @@ static void ask(rb_bot_t *b) {
              "You are friendly, a bit dorky, and you make silly jokes. You know nothing after 2001. "
              "Answer the last message in one short line of at most %d characters, like a text "
              "between friends. Plain text: no emoji, no lists, no quotes, no hashtags.",
-             b->nick, RB_ROOM[b->room].name, BOT_LINE_MAX - 5);
+             b->nick, RB_ROOM[b->room].name, RB_LINE - 5);
     json_escape(sys, esc, sizeof esc);
     int n = snprintf(b->job_body, sizeof b->job_body,
                      "{\"model\":\"%s\",\"stream\":false,\"keep_alive\":\"30m\","
@@ -656,11 +778,16 @@ static void ask(rb_bot_t *b) {
                       b->hist[i].mine ? "assistant" : "user", esc);
     }
     snprintf(b->job_body + n, sizeof b->job_body - (size_t)n, "]}");
+    const char *q = b->hist_n ? question(b->hist[b->hist_n - 1].text) : NULL;
+    snprintf(b->job_q, sizeof b->job_q, "%s", q ? q : "");
     SDL_AtomicSet(&b->job_done, 0);
     b->thread = SDL_CreateThread(chat_worker, "rebiko-llm-chat", b);
     b->job_running = b->thread != NULL;
     b->pending = false;
-    if (b->job_running)
+    if (b->job_running && b->job_q[0])
+        snprintf(b->status, sizeof b->status, "%s is looking up \"%.60s\" on Wikipedia...",
+                 b->nick, b->job_q);
+    else if (b->job_running)
         snprintf(b->status, sizeof b->status, "%s is thinking (%s)...", b->nick, b->model);
     else
         snprintf(b->status, sizeof b->status, "Could not start a thread");
@@ -675,14 +802,17 @@ static void answered(rb_bot_t *b) {
         snprintf(b->status, sizeof b->status, "LLM: %s", b->job_err);
         return;
     }
-    char line[BOT_LINE_MAX + 1];
-    rb_bot_clean(b->job_out, line, BOT_LINE_MAX);
-    if (!line[0]) {
+    char lines[RB_LOOKUP_LINES][RB_LINE + 1], line[RB_LINE * RB_LOOKUP_LINES + 1] = "";
+    int n = rb_bot_split(b->job_out, lines, b->job_q[0] ? RB_LOOKUP_LINES : 1);
+    if (!n) {
         snprintf(b->status, sizeof b->status, "%s is in %s, listening (the reply had nothing to type)",
                  b->nick, RB_ROOM[b->room].name);
         return;
     }
-    push_text(b, line);
+    for (int i = 0; i < n; i++) {
+        push_text(b, lines[i]);
+        snprintf(line + strlen(line), sizeof line - strlen(line), "%s%s", i ? " " : "", lines[i]);
+    }
     if (b->hist_n == BOT_HISTORY) {
         memmove(b->hist, b->hist + 1, sizeof b->hist[0] * (BOT_HISTORY - 1));
         b->hist_n--;
