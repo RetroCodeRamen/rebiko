@@ -47,6 +47,10 @@ int rb_cfs_list(const uint8_t *flash, size_t len, rb_cfs_entry_t *out, int max,
  * there is no such file. */
 long rb_cfs_read(const uint8_t *flash, size_t len, const char *name,
                  uint8_t *out, size_t cap);
+/* Overwrite n bytes of a file at offset at, in place (the file keeps its
+ * size), re-sealing each page changed. False if the file is too short. */
+bool rb_cfs_patch(uint8_t *flash, size_t len, const char *name, size_t at,
+                  const uint8_t *src, size_t n);
 
 /* ---- CyOS's serial console ---- */
 

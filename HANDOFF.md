@@ -48,7 +48,8 @@ Read this, then [PLAN.md](PLAN.md) (the work order) and [ARCHITECTURE.md](ARCHIT
 4. **T-Deck USB input stall** (above): likely in the T-Deck's USB-serial handling when its output backs up.
 5. **Cylandia runs at 54–58 fps** on the T-Deck: CyOS alone uses 4.5–4.85 s of every 5 s there. Needs core speed (profile Cylandia, run hot loops natively as `hle_v1_*` does).
 6. **Group encryption** (the user decided the design on 28 Oct: see PLAN.md Open item 4). Open by default; with a group passphrase, the whole link packet is encrypted except a key id and nonce.
-7. Smaller: Classic `~` has no mapping (CyOS types Shift+` as `); WiFi time for T-Decks away from the Desktop; radio settings in the Pocket menu; range at SF8/SF9.
+7. **LLM buddy (Tyler) on the Desktop** is built and tested over LoRa with the T-Deck (PLAN "In progress"). Untested on Windows. The T-Deck's own typing loses Shift the same way the bot's did ("JApan"); the bot's measured timings (12 frames up between keys, Shift 10 frames either side) are the starting point for `rebiko_input.c`.
+8. Smaller: Classic `~` has no mapping (CyOS types Shift+` as `); WiFi time for T-Decks away from the Desktop; radio settings in the Pocket menu; range at SF8/SF9.
 
 ## Where things live
 

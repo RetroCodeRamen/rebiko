@@ -71,6 +71,19 @@
 #include "radio_lora.h"
 #include "radio_serial_phy.h"
 #include "rebiko_apps.h"
+#ifdef CYBIKO_MACHINE_V1
+#include "rebiko_bot.h"
+
+/* Menu > LLM: a second Classic answering in a Chat room (rebiko_bot.c) */
+static char llm_server[128] = "http://localhost:11434";
+static char llm_model[64];
+static int llm_room = 3;    /* Computers */
+static bool llm_on;         /* the bot is running; it starts again at launch */
+static rb_air_t llm_air;
+/* The main window shows the bot's Cybiko (and the keyboard is its) */
+static bool llm_view;
+static uint8_t llm_px[2][CYBIKO_LCD_WIDTH * CYBIKO_LCD_HEIGHT];   /* last frame: mine, the bot's */
+#endif
 
 #define MAX_HELD 16
 /* CyOS 1.2.46 misses a key held under 10 frames now and then (v1_chat);
@@ -109,7 +122,7 @@
 #endif
 
 #ifdef CYBIKO_MACHINE_V1
-#define MENU_N 6
+#define MENU_N 7
 #else
 #define MENU_N 5
 #endif
@@ -637,7 +650,7 @@ static void draw_text(SDL_Renderer *ren, int x, int y, int scale,
 
 static const char *MENU_LABEL[MENU_N] = {
 #ifdef CYBIKO_MACHINE_V1
-    "Settings", "Apps", "Status", "Help", "Minimize", "Close"
+    "Settings", "Apps", "LLM", "Status", "Help", "Minimize", "Close"
 #else
     "Settings", "Status", "Help", "Minimize", "Close"
 #endif
@@ -724,6 +737,15 @@ static void load_prefs(sdl_ctx_t *s) {
         } else if (sscanf(line, "view=%d", &v) == 1) {
             s->view = (v == VIEW_CLOSEUP) ? VIEW_CLOSEUP : VIEW_BODY;
         } else if (sscanf(line, "machine=%15s", s->machine_pref) == 1) {
+#ifdef CYBIKO_MACHINE_V1
+        } else if (sscanf(line, "llm_server=%127s", llm_server) == 1) {
+        } else if (sscanf(line, "llm_model=%63s", llm_model) == 1) {
+            if (strcmp(llm_model, "-") == 0) llm_model[0] = 0;
+        } else if (sscanf(line, "llm_room=%d", &v) == 1) {
+            llm_room = v >= 0 && v < RB_ROOMS ? v : 3;
+        } else if (sscanf(line, "llm_on=%d", &v) == 1) {
+            llm_on = v != 0;
+#endif
         }
     }
     fclose(f);
@@ -737,6 +759,10 @@ static void save_prefs(const sdl_ctx_t *s) {
     fprintf(f, "scale=%d\nalways_on_top=%d\nmute=%d\ncolor=%d\nview=%d\nmachine=%s\n",
             s->scale_pct, s->always_on_top ? 1 : 0, s->mute ? 1 : 0,
             s->color, s->view, s->machine_pref[0] ? s->machine_pref : MACHINE_NAME);
+#ifdef CYBIKO_MACHINE_V1
+    fprintf(f, "llm_server=%s\nllm_model=%s\nllm_room=%d\nllm_on=%d\n",
+            llm_server, llm_model[0] ? llm_model : "-", llm_room, llm_on ? 1 : 0);
+#endif
     fclose(f);
 }
 
@@ -2260,6 +2286,331 @@ static bool apps_event(sdl_ctx_t *s, const SDL_Event *ev) {
     }
     return false;
 }
+
+/* ---- the LLM window: server, Connect, model, room, Start ---- */
+
+#define LLM_W 560
+#define LLM_H 490
+#define LLM_LIST_Y 128
+#define LLM_ROW 16
+#define LLM_ROWS 9
+#define LLM_ROOM_Y 300
+#define LLM_START_Y 340
+#define LLM_BTN_H 28
+
+static SDL_Window *llm_win;
+static SDL_Renderer *llm_ren;
+static rb_llm_list_t llm_job;
+static bool llm_busy;                 /* Connect is waiting on the server */
+static char llm_models[RB_LLM_MAX_MODELS][64];
+static int llm_model_n, llm_top;
+static char llm_msg[200];
+static int llm_msg_kind;              /* as apps_msg_kind */
+static char llm_shown[3][200];        /* the bot's lines last drawn */
+/* the bot and what it needs to start */
+static rb_bot_t *llm_bot;
+static uint8_t *llm_boot;             /* the bot's Cybiko boots from it too */
+static size_t llm_boot_n;
+static char llm_save[4096];           /* bot.flash beside the Desktop's save */
+static int llm_room_x[RB_ROOMS], llm_room_w[RB_ROOMS];
+
+static void llm_say(int kind, const char *msg) {
+    snprintf(llm_msg, sizeof llm_msg, "%s", msg);
+    llm_msg_kind = kind;
+}
+
+static void set_llm_view(sdl_ctx_t *s, bool bot);
+static void bot_render(void *ctx, const uint8_t *px, int w, int h);
+
+#define LLM_VIEW_X 188
+#define LLM_VIEW_W 220
+
+static void draw_llm(sdl_ctx_t *s) {
+    uint8_t ar, ag, ab;
+    char line[200];
+    if (!llm_ren) return;
+    SDL_Renderer *r = llm_ren;
+    shell_accent(s->color, &ar, &ag, &ab);
+    SDL_SetRenderDrawColor(r, 16, 20, 28, 255);
+    SDL_RenderClear(r);
+    draw_text(r, 16, 14, 2, ar, ag, ab, "LLM");
+    draw_text(r, 80, 20, 1, 140, 150, 166, "a local model on your PC chatting in a room");
+
+    draw_text(r, 16, 52, 1, 230, 240, 255, "Ollama server");
+    apps_box(r, 16, 66, 380, 24, 72, 78, 90);
+    snprintf(line, sizeof line, "%s_", llm_server);
+    apps_text(r, 22, 74, 46, 255, 255, 255, line);
+    SDL_Rect cb = { 408, 64, 136, LLM_BTN_H };
+    SDL_SetRenderDrawColor(r, 28, 34, 46, 255);
+    SDL_RenderFillRect(r, &cb);
+    apps_box(r, cb.x, cb.y, cb.w, cb.h, llm_busy ? 72 : ar, llm_busy ? 78 : ag, llm_busy ? 90 : ab);
+    draw_text(r, cb.x + 12, cb.y + 6, 2, llm_busy ? 120 : 230, llm_busy ? 128 : 240,
+              llm_busy ? 140 : 255, llm_busy ? "Wait..." : "Connect");
+
+    snprintf(line, sizeof line, "Model%s", llm_model[0] ? "" : "  (Connect, then pick one)");
+    draw_text(r, 16, 108, 1, 230, 240, 255, line);
+    apps_box(r, 14, LLM_LIST_Y - 2, LLM_W - 28, LLM_ROWS * LLM_ROW + 4, 72, 78, 90);
+    for (int i = 0; i < LLM_ROWS && llm_top + i < llm_model_n; i++) {
+        int k = llm_top + i, y = LLM_LIST_Y + i * LLM_ROW;
+        bool sel = strcmp(llm_models[k], llm_model) == 0;
+        if (sel) {
+            SDL_Rect hi = { 16, y, LLM_W - 32, LLM_ROW };
+            SDL_SetRenderDrawColor(r, 40, 52, 72, 255);
+            SDL_RenderFillRect(r, &hi);
+        }
+        apps_text(r, 22, y + 4, 62, sel ? ar : 230, sel ? ag : 240, sel ? ab : 255, llm_models[k]);
+    }
+    if (!llm_model_n && llm_model[0]) {
+        snprintf(line, sizeof line, "%s (saved)", llm_model);
+        apps_text(r, 22, LLM_LIST_Y + 4, 62, ar, ag, ab, line);
+    }
+
+    draw_text(r, 16, LLM_ROOM_Y - 16, 1, 230, 240, 255, "Chat room");
+    int x = 16;
+    for (int i = 0; i < RB_ROOMS; i++) {
+        int w = (int)strlen(RB_ROOM[i].name) * 8 + 12;
+        llm_room_x[i] = x;
+        llm_room_w[i] = w;
+        if (i == llm_room) {
+            SDL_Rect box = { x, LLM_ROOM_Y, w, 18 };
+            SDL_SetRenderDrawColor(r, ar, ag, ab, 255);
+            SDL_RenderFillRect(r, &box);
+            draw_text(r, x + 6, LLM_ROOM_Y + 5, 1, 16, 20, 28, RB_ROOM[i].name);
+        } else {
+            apps_box(r, x, LLM_ROOM_Y, w, 18, 72, 78, 90);
+            draw_text(r, x + 6, LLM_ROOM_Y + 5, 1, 200, 210, 220, RB_ROOM[i].name);
+        }
+        x += w + 6;
+    }
+
+    bool can = llm_bot || llm_model[0];
+    SDL_Rect sb = { 16, LLM_START_Y, 160, LLM_BTN_H };
+    SDL_SetRenderDrawColor(r, 28, 34, 46, 255);
+    SDL_RenderFillRect(r, &sb);
+    apps_box(r, sb.x, sb.y, sb.w, sb.h, can ? ar : 72, can ? ag : 78, can ? ab : 90);
+    const char *sl = llm_bot ? "Stop" : "Start";
+    draw_text(r, sb.x + (sb.w - (int)strlen(sl) * 16) / 2, sb.y + 6, 2,
+              can ? 230 : 120, can ? 240 : 128, can ? 255 : 140, sl);
+    /* which Cybiko the main window shows, and the keyboard drives */
+    SDL_Rect vb = { LLM_VIEW_X, LLM_START_Y, LLM_VIEW_W, LLM_BTN_H };
+    SDL_SetRenderDrawColor(r, 28, 34, 46, 255);
+    SDL_RenderFillRect(r, &vb);
+    apps_box(r, vb.x, vb.y, vb.w, vb.h, llm_bot ? ar : 72, llm_bot ? ag : 78, llm_bot ? ab : 90);
+    const char *vl = llm_view ? "Show mine" : "Show " RB_BOT_NICK;
+    draw_text(r, vb.x + (vb.w - (int)strlen(vl) * 16) / 2, vb.y + 6, 2,
+              llm_bot ? 230 : 120, llm_bot ? 240 : 128, llm_bot ? 255 : 140, vl);
+    apps_text(r, 16, LLM_START_Y + 40, 66, llm_bot ? ar : 140, llm_bot ? ag : 150,
+              llm_bot ? ab : 166, rb_bot_status(llm_bot));
+    snprintf(line, sizeof line, "Heard: %s", rb_bot_heard(llm_bot));
+    apps_text(r, 16, LLM_START_Y + 58, 66, 200, 210, 220, line);
+    snprintf(line, sizeof line, "Said:  %s", rb_bot_said(llm_bot));
+    apps_text(r, 16, LLM_START_Y + 74, 66, 200, 210, 220, line);
+    snprintf(line, sizeof line, "The main window shows %s.",
+             llm_view ? RB_BOT_NICK "'s Cybiko: the keyboard types as " RB_BOT_NICK : "your Cybiko");
+    apps_text(r, 16, LLM_START_Y + 92, 66, 140, 150, 166, line);
+
+    if (llm_msg[0]) {
+        uint8_t mr = 230, mg = 240, mb = 255;
+        if (llm_msg_kind == 1) { mr = 90; mg = 220; mb = 130; }
+        else if (llm_msg_kind == 2) { mr = 255; mg = 90; mb = 90; }
+        else if (llm_msg_kind == 3) { mr = ar; mg = ag; mb = ab; }
+        apps_text(r, 16, LLM_H - 28, 66, mr, mg, mb, llm_msg);
+    }
+    SDL_RenderPresent(r);
+}
+
+static void close_llm(void) {
+    if (llm_ren) SDL_DestroyRenderer(llm_ren);
+    if (llm_win) SDL_DestroyWindow(llm_win);
+    llm_ren = NULL;
+    llm_win = NULL;
+}
+
+static void llm_connect(void) {
+    if (llm_busy) return;
+    rb_llm_list_start(&llm_job, llm_server);
+    llm_busy = true;
+    llm_say(3, "Asking the server for its models...");
+}
+
+static void open_llm(sdl_ctx_t *s) {
+    s->menu_open = false;
+    if (llm_win) {
+        SDL_RaiseWindow(llm_win);
+        return;
+    }
+    llm_win = SDL_CreateWindow("ReBiko LLM", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                               LLM_W, LLM_H, s->always_on_top ? SDL_WINDOW_ALWAYS_ON_TOP : 0);
+    llm_ren = llm_win ? SDL_CreateRenderer(llm_win, -1, SDL_RENDERER_ACCELERATED) : NULL;
+    if (!llm_ren) {
+        close_llm();
+        return;
+    }
+    apply_app_icon(s, llm_win);
+    if (!llm_msg[0])
+        llm_say(0, "Type the server's address and press Connect. Ollama: ollama.com");
+    draw_llm(s);
+}
+
+static void llm_stop(sdl_ctx_t *s) {
+    rb_bot_stop(llm_bot);   /* saves bot.flash */
+    llm_bot = NULL;
+    set_llm_view(s, false);
+    llm_on = false;
+    save_prefs(s);
+}
+
+/* The bot's Cybiko: its own save, or the first time a copy of this one's
+ * flash with the bot's nickname */
+static void llm_start(sdl_ctx_t *s) {
+    if (llm_bot || !llm_model[0] || !llm_boot || !s->emu) return;
+    size_t n = 0;
+    uint8_t *img = llm_save[0] && file_ok(llm_save) ? load_file(llm_save, &n) : NULL;
+    if (!img) {
+        uint32_t w;
+        const uint8_t *cur = cybiko_get_spi_flash(s->emu, &n, &w);
+        img = cur ? malloc(n) : NULL;
+        if (!img) return;
+        memcpy(img, cur, n);
+        if (!rb_bot_set_nick(img, n, RB_BOT_NICK))
+            fprintf(stderr, "LLM: could not set the bot's nickname\n");
+    }
+    llm_bot = rb_bot_start(llm_boot, llm_boot_n, img, n, llm_save, s->radio_cyid ^ 0x00B07000u,
+                           &llm_air, RB_BOT_NICK, llm_server, llm_model, llm_room);
+    free(img);
+    if (!llm_bot) {
+        llm_say(2, "Could not start the bot's Cybiko");
+        return;
+    }
+    llm_on = true;
+    save_prefs(s);
+    rb_bot_set_view(llm_bot, bot_render, s);
+    open_llm(s);   /* never runs out of sight */
+    set_llm_view(s, true);
+    llm_say(1, RB_BOT_NICK "'s Cybiko is starting; it walks into the room in about 30 s.");
+}
+
+/* Once a frame */
+static void llm_tick(sdl_ctx_t *s) {
+    if (llm_bot && s->powered) rb_bot_frame(llm_bot);
+    bool redraw = false;
+    if (llm_busy && llm_job.done) {
+        SDL_MemoryBarrierAcquire();
+        rb_llm_list_finish(&llm_job);
+        llm_busy = false;
+        llm_model_n = llm_job.n;
+        llm_top = 0;
+        memcpy(llm_models, llm_job.names, sizeof llm_models);
+        if (llm_job.err[0]) llm_say(2, llm_job.err);
+        else {
+            char m[200];
+            snprintf(m, sizeof m, "%d model%s. Pick one and a room, then Start.", llm_model_n,
+                     llm_model_n == 1 ? "" : "s");
+            llm_say(1, m);
+            save_prefs(s);   /* the server worked: keep it */
+        }
+        redraw = true;
+    }
+    if (!llm_win) return;
+    const char *now[3] = { rb_bot_status(llm_bot), rb_bot_heard(llm_bot), rb_bot_said(llm_bot) };
+    for (int i = 0; i < 3; i++)
+        if (strcmp(now[i], llm_shown[i]) != 0) {
+            snprintf(llm_shown[i], sizeof llm_shown[i], "%s", now[i]);
+            redraw = true;
+        }
+    if (redraw) draw_llm(s);
+}
+
+/* True if the event was the LLM window's */
+static bool llm_event(sdl_ctx_t *s, const SDL_Event *ev) {
+    if (!llm_win) return false;
+    Uint32 id = SDL_GetWindowID(llm_win);
+    switch (ev->type) {
+    case SDL_WINDOWEVENT:
+        if (ev->window.windowID != id) return false;
+        if (ev->window.event == SDL_WINDOWEVENT_CLOSE) close_llm();
+        else if (ev->window.event == SDL_WINDOWEVENT_EXPOSED) draw_llm(s);
+        return true;
+    case SDL_MOUSEWHEEL:
+        if (ev->wheel.windowID != id) return false;
+        llm_top -= ev->wheel.y;
+        if (llm_top > llm_model_n - LLM_ROWS) llm_top = llm_model_n - LLM_ROWS;
+        if (llm_top < 0) llm_top = 0;
+        draw_llm(s);
+        return true;
+    case SDL_MOUSEBUTTONDOWN: {
+        if (ev->button.windowID != id) return false;
+        int x = ev->button.x, y = ev->button.y;
+        if (ev->button.button != SDL_BUTTON_LEFT) return true;
+        bool restart = false;
+        if (x >= 408 && x < 544 && y >= 64 && y < 64 + LLM_BTN_H) {
+            llm_connect();
+        } else if (y >= LLM_LIST_Y && y < LLM_LIST_Y + LLM_ROWS * LLM_ROW && x >= 16 && x < LLM_W - 16) {
+            int k = llm_top + (y - LLM_LIST_Y) / LLM_ROW;
+            if (k < llm_model_n && strcmp(llm_model, llm_models[k]) != 0) {
+                snprintf(llm_model, sizeof llm_model, "%s", llm_models[k]);
+                restart = llm_bot != NULL;
+                save_prefs(s);
+            }
+        } else if (y >= LLM_ROOM_Y && y < LLM_ROOM_Y + 18) {
+            for (int i = 0; i < RB_ROOMS; i++)
+                if (x >= llm_room_x[i] && x < llm_room_x[i] + llm_room_w[i] && i != llm_room) {
+                    llm_room = i;
+                    restart = llm_bot != NULL;
+                    save_prefs(s);
+                }
+        } else if (x >= LLM_VIEW_X && x < LLM_VIEW_X + LLM_VIEW_W && y >= LLM_START_Y
+                   && y < LLM_START_Y + LLM_BTN_H) {
+            set_llm_view(s, !llm_view);
+        } else if (x >= 16 && x < 176 && y >= LLM_START_Y && y < LLM_START_Y + LLM_BTN_H) {
+            if (llm_bot) {
+                llm_stop(s);
+                llm_say(0, "Stopped. " RB_BOT_NICK "'s Cybiko is saved for next time.");
+            } else {
+                llm_start(s);
+            }
+        }
+        if (restart) {   /* another room or model: walk in again */
+            llm_stop(s);
+            llm_start(s);
+        }
+        draw_llm(s);
+        return true;
+    }
+    case SDL_MOUSEBUTTONUP:
+    case SDL_MOUSEMOTION:
+        return (ev->type == SDL_MOUSEMOTION ? ev->motion.windowID : ev->button.windowID) == id;
+    case SDL_TEXTINPUT: {
+        if (ev->text.windowID != id) return false;
+        size_t n = strlen(llm_server);
+        for (const char *t = ev->text.text; *t && n < sizeof llm_server - 1; t++)
+            if (*t > ' ' && *t < 127) llm_server[n++] = *t;
+        llm_server[n] = 0;
+        draw_llm(s);
+        return true;
+    }
+    case SDL_KEYDOWN: {
+        if (ev->key.windowID != id) return false;
+        SDL_Keycode k = ev->key.keysym.sym;
+        size_t n = strlen(llm_server);
+        if (k == SDLK_ESCAPE) { close_llm(); return true; }
+        if (k == SDLK_BACKSPACE && n) llm_server[n - 1] = 0;
+        else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) llm_connect();
+        else if (k == SDLK_v && (ev->key.keysym.mod & KMOD_CTRL) && SDL_HasClipboardText()) {
+            char *c = SDL_GetClipboardText();
+            for (const char *t = c; t && *t && n < sizeof llm_server - 1; t++)
+                if (*t > ' ' && *t < 127) llm_server[n++] = *t;
+            llm_server[n] = 0;
+            SDL_free(c);
+        }
+        draw_llm(s);
+        return true;
+    }
+    case SDL_KEYUP:
+        return ev->key.windowID == id;
+    }
+    return false;
+}
 #endif
 
 /* This PC's local time as seconds since 1970, counted as if it were UTC:
@@ -2300,8 +2651,12 @@ static void guest_reboot(sdl_ctx_t *s) {
         cybiko_reboot(s->emu);
     if (s->coproc) {
         cybiko_radio_coproc_init(s->coproc);
+#ifdef CYBIKO_MACHINE_V1
+        cybiko_radio_coproc_set_transport(s->coproc, rb_air_port(&llm_air, 0));
+#else
         if (s->lora)
             cybiko_radio_coproc_set_transport(s->coproc, &s->lora->base);
+#endif
         if (s->emu)
             attach_radio(s->emu, s->coproc, s->radio_cyid);
     }
@@ -2680,7 +3035,8 @@ static void menu_action(sdl_ctx_t *s, int item) {
     s->menu_open = false;
 #ifdef CYBIKO_MACHINE_V1
     if (item == 1) { open_apps(s); return; }
-    if (item > 1) item--;
+    if (item == 2) { open_llm(s); return; }
+    if (item > 2) item -= 2;
 #endif
     if (item == 0) open_settings(s);
     else if (item == 1) open_status(s);
@@ -2758,8 +3114,7 @@ static void present(sdl_ctx_t *s) {
     SDL_RenderPresent(s->renderer);
 }
 
-static void hal_render(void *ctx, const uint8_t *px, int w, int h) {
-    sdl_ctx_t *s = ctx;
+static void draw_lcd(sdl_ctx_t *s, const uint8_t *px, int w, int h) {
     uint32_t *tex; int pitch;
     SDL_LockTexture(s->texture, NULL, (void **)&tex, &pitch);
     for (int i = 0; i < w * h; i++) {
@@ -2770,10 +3125,40 @@ static void hal_render(void *ctx, const uint8_t *px, int w, int h) {
     present(s);
 }
 
+static void hal_render(void *ctx, const uint8_t *px, int w, int h) {
+    sdl_ctx_t *s = ctx;
+#ifdef CYBIKO_MACHINE_V1
+    if (w * h <= (int)sizeof llm_px[0]) memcpy(llm_px[0], px, (size_t)(w * h));
+    if (llm_view) return;
+#endif
+    draw_lcd(s, px, w, h);
+}
+
+#ifdef CYBIKO_MACHINE_V1
+static void bot_render(void *ctx, const uint8_t *px, int w, int h) {
+    if (w * h <= (int)sizeof llm_px[1]) memcpy(llm_px[1], px, (size_t)(w * h));
+    if (llm_view) draw_lcd(ctx, px, w, h);
+}
+
+/* The main window: the bot's Cybiko or mine */
+static void set_llm_view(sdl_ctx_t *s, bool bot) {
+    llm_view = bot && llm_bot;
+    drop_all_keys(s);
+    rb_bot_set_user_keys(llm_bot, llm_view ? s->key_matrix : NULL);
+    if (s->win)
+        SDL_SetWindowTitle(s->win, llm_view ? "ReBiko Desktop - " RB_BOT_NICK "'s Cybiko (LLM)"
+                                            : "ReBiko Desktop");
+    draw_lcd(s, llm_px[llm_view ? 1 : 0], CYBIKO_LCD_WIDTH, CYBIKO_LCD_HEIGHT);
+}
+#endif
+
 static void hal_keys(void *ctx, uint16_t *m, int n) {
     sdl_ctx_t *s = ctx;
     int cols = n < CYBIKO_KEYBOARD_COLUMNS ? n : CYBIKO_KEYBOARD_COLUMNS;
     memcpy(m, s->key_matrix, (size_t)cols * sizeof(uint16_t));
+#ifdef CYBIKO_MACHINE_V1
+    if (llm_view) memset(m, 0, (size_t)cols * sizeof(uint16_t));   /* the bot's keyboard now */
+#endif
 }
 
 /* Most audio allowed to wait in SDL's queue: 100 ms. Past that a frame's
@@ -2912,7 +3297,7 @@ static void on_key(sdl_ctx_t *s, const SDL_KeyboardEvent *ev) {
 static void on_event(sdl_ctx_t *s, const SDL_Event *ev, bool *running) {
     int ix, iy;
 #ifdef CYBIKO_MACHINE_V1
-    if (apps_event(s, ev))
+    if (apps_event(s, ev) || llm_event(s, ev))
         return;
 #endif
     Uint32 settings_id = s->settings_win ? SDL_GetWindowID(s->settings_win) : 0;
@@ -3356,7 +3741,17 @@ int main(int argc, char **argv) {
         fprintf(stderr, "emulator setup failed\n");
         return 1;
     }
+#ifdef CYBIKO_MACHINE_V1
+    llm_boot = boot;
+    llm_boot_n = boot_n;
+    if (nvram_path) {
+        char d[4096];
+        dir_of(nvram_path, d, sizeof d);
+        snprintf(llm_save, sizeof llm_save, "%s/bot.flash", d);
+    }
+#else
     free(boot);
+#endif
     free(flash);
 #ifndef CYBIKO_MACHINE_V1
     /* the Xtreme's save is its 2 MB RAM, which holds its file system */
@@ -3389,6 +3784,15 @@ int main(int argc, char **argv) {
         radio_path = sdl.radio_buf;
     }
     sdl.radio_path = radio_path;
+#ifdef CYBIKO_MACHINE_V1
+    /* One air for this Cybiko, the LLM bot's and the Heltec: the Cybiko's
+     * radio is up with or without a Heltec */
+    rb_air_init(&llm_air, cyid, cyid ^ 0x00B07000u);
+    sdl.coproc = &cop;
+    cybiko_radio_coproc_init(&cop);
+    cybiko_radio_coproc_set_transport(&cop, rb_air_port(&llm_air, 0));
+    attach_radio(emu, &cop, cyid);
+#endif
     if (radio_path) {
         if (cybiko_serial_phy_open(&phy, radio_path) != 0) {
             fprintf(stderr, "radio '%s': %s%s\n", radio_path, strerror(errno),
@@ -3400,10 +3804,14 @@ int main(int argc, char **argv) {
             cybiko_lora_init(&link, &phy.phy, cyid, true);
             cybiko_lora_seed_msg_id(&link, (uint32_t)SDL_GetPerformanceCounter());
             sdl.lora = &link;
+#ifdef CYBIKO_MACHINE_V1
+            rb_air_set_link(&llm_air, &link.base);
+#else
             sdl.coproc = &cop;
             cybiko_radio_coproc_init(&cop);
             cybiko_radio_coproc_set_transport(&cop, &link.base);
             attach_radio(emu, &cop, cyid);
+#endif
             cybiko_serial_phy_request_status(&phy);
             sdl.radio_on = true;
             fprintf(stderr, "Radio on %s, CyID %08X\n", radio_path, (unsigned)cyid);
@@ -3438,7 +3846,9 @@ int main(int argc, char **argv) {
      *   CYBIKO_KEYS=f:SCANCODE,... press that key at frame f (12 frames)
      *   CYBIKO_OPEN_SETTINGS=1   open Settings; shots include it
      *   CYBIKO_OPEN_APPS=text    open Apps searching for text; shots include it
-     *   CYBIKO_APPS_SEND=f, CYBIKO_APPS_RESTART=f   press those at frame f */
+     *   CYBIKO_APPS_SEND=f, CYBIKO_APPS_RESTART=f   press those at frame f
+ *   CYBIKO_OPEN_LLM=1        open LLM; =connect also presses Connect
+ *   CYBIKO_CONSOLE=f:line    send line to CyOS's console at frame f */
     const char *shot = getenv("CYBIKO_SHOT");
     int shot_every = getenv("CYBIKO_SHOT_EVERY") ? atoi(getenv("CYBIKO_SHOT_EVERY")) : 600;
     int quit_at = getenv("CYBIKO_QUIT_AT") ? atoi(getenv("CYBIKO_QUIT_AT")) : 0;
@@ -3477,6 +3887,13 @@ int main(int argc, char **argv) {
         if (getenv("CYBIKO_APPS_SEND") && frame_no == atoi(getenv("CYBIKO_APPS_SEND"))) {
             apps_send(&sdl);
             draw_apps(&sdl);
+        }
+        if (getenv("CYBIKO_CONSOLE") && frame_no == atoi(getenv("CYBIKO_CONSOLE"))
+            && strchr(getenv("CYBIKO_CONSOLE"), ':'))
+            rb_con_command(&apps_con, strchr(getenv("CYBIKO_CONSOLE"), ':') + 1);
+        if (frame_no == 1 && getenv("CYBIKO_OPEN_LLM")) {
+            open_llm(&sdl);
+            if (getenv("CYBIKO_OPEN_LLM")[0] == 'c') llm_connect();
         }
         if (getenv("CYBIKO_APPS_RESTART") && frame_no == atoi(getenv("CYBIKO_APPS_RESTART"))) {
             apps_restart();
@@ -3518,6 +3935,17 @@ int main(int argc, char **argv) {
                 }
                 if (ss) SDL_FreeSurface(ss);
             }
+            if (llm_ren) {
+                draw_llm(&sdl);
+                ss = SDL_CreateRGBSurfaceWithFormat(0, LLM_W, LLM_H, 32, SDL_PIXELFORMAT_ARGB8888);
+                if (ss && SDL_RenderReadPixels(llm_ren, NULL, SDL_PIXELFORMAT_ARGB8888,
+                                               ss->pixels, ss->pitch) == 0) {
+                    char path[512];
+                    snprintf(path, sizeof path, "%s_llm_%06d.bmp", shot, frame_no);
+                    SDL_SaveBMP(ss, path);
+                }
+                if (ss) SDL_FreeSurface(ss);
+            }
 #endif
             if (sdl.settings_ren) {
                 ss = SDL_CreateRGBSurfaceWithFormat(0, SETTINGS_W, SETTINGS_H, 32, SDL_PIXELFORMAT_ARGB8888);
@@ -3537,6 +3965,9 @@ int main(int argc, char **argv) {
         rb_con_poll(&apps_con, 16);
         link_pump();
         apps_tick(&sdl);
+        llm_air.link = sdl.radio_on && sdl.lora ? &sdl.lora->base : NULL;
+        if (frame_no == 1 && llm_on) llm_start(&sdl);   /* it was running last time */
+        llm_tick(&sdl);
 #endif
         if (sdl.radio_on) {
             link.base.pump(&link.base);
@@ -3601,6 +4032,15 @@ int main(int argc, char **argv) {
         radio_report(emu, &link, &phy);
         cybiko_serial_phy_close(&phy);
     }
+#ifdef CYBIKO_MACHINE_V1
+    {
+        rb_bot_stop(llm_bot);   /* llm_on stays: it starts again next time */
+        llm_bot = NULL;
+        free(llm_boot);
+        if (llm_busy) rb_llm_list_finish(&llm_job);
+        close_llm();
+    }
+#endif
     cybiko_destroy(emu);
     close_status(&sdl);
     close_about(&sdl);

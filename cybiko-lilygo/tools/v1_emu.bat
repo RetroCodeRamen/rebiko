@@ -14,16 +14,16 @@ if not defined OUT set OUT=%HERE%\.pio\v1_emu.exe
 if not exist "%HERE%\.pio" mkdir "%HERE%\.pio"
 if not defined STRIDE set STRIDE=12
 if not defined XT_STRIDE set XT_STRIDE=20
-call :build "%OUT%" V1 %STRIDE% || exit /b 1
+call :build "%OUT%" V1 %STRIDE% "%HERE%\tools\rebiko_bot.c" "%HERE%\cybiko-emu\tdeck_keymap.c" || exit /b 1
 call :build "%HERE%\.pio\xt_emu.exe" XT %XT_STRIDE% || exit /b 1
 "%OUT%" %*
 exit /b
 
 :build
-gcc -std=c11 -D_DEFAULT_SOURCE -DEMU_TIMER_STRIDE=%3 -DCYBIKO_MACHINE_%2 -O2 -Wall -Wextra ^
+gcc -std=c11 -D_DEFAULT_SOURCE -DEMU_TIMER_STRIDE=%3 -DCYBIKO_MACHINE_%2 -O2 -Wall -Wextra -Wno-missing-field-initializers ^
   -I"%CORE%" -I"%CORE%\core" -I"%RADIO%" -I"%HERE%\tools" ^
   -I"%HERE%\cybiko-emu" ^
-  -o %1 "%HERE%\tools\v1_emu.c" "%HERE%\tools\host_serial.c" "%HERE%\cybiko-emu\rebiko_apps.c" ^
+  -o %1 "%HERE%\tools\v1_emu.c" "%HERE%\tools\host_serial.c" "%HERE%\cybiko-emu\rebiko_apps.c" %4 %5 ^
   "%CORE%\cybiko_core_unity.c" ^
   "%RADIO%\sci2_xt.c" "%RADIO%\sci0_v1.c" "%RADIO%\radio_coproc.c" ^
   "%RADIO%\radio_link.c" "%RADIO%\radio_lora.c" "%RADIO%\radio_serial_phy.c" ^

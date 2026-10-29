@@ -89,6 +89,67 @@ long rb_cfs_read(const uint8_t *flash, size_t len, const char *name,
     return (long)total;
 }
 
+/* A page's header after its block changed: CRC-32 of the 254 bytes after
+ * the header, big-endian, and the check word over the first six bytes,
+ * byte-swapped (as at45_format_free in the core) */
+static void cfs_seal(uint8_t *page) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (int i = 8; i < CFS_PAGE - 2; i++) {
+        crc ^= page[i];
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1)));
+    }
+    crc = ~crc;
+    page[0] = (uint8_t)(crc >> 24); page[1] = (uint8_t)(crc >> 16);
+    page[2] = (uint8_t)(crc >> 8);  page[3] = (uint8_t)crc;
+    unsigned v = 0xAF17u ^ be16(page) ^ be16(page + 2) ^ be16(page + 4);
+    page[6] = (uint8_t)v;
+    page[7] = (uint8_t)(v >> 8);
+}
+
+bool rb_cfs_patch(uint8_t *flash, size_t len, const char *name, size_t at,
+                  const uint8_t *src, size_t n) {
+    int pages = (int)(len / CFS_PAGE);
+    int id = -1;
+    for (int p = CFS_FIRST; p < pages && id < 0; p++) {
+        const uint8_t *b = cfs_block(flash, len, p);
+        if ((b[0] & 0x80) && be16(b + 4) == 0 &&
+            strncmp((const char *)b + 7, name, 59) == 0)
+            id = (int)be16(b + 2);
+    }
+    if (id < 0)
+        return false;
+    size_t total = 0, done = 0;
+    for (unsigned part = 0; done < n; part++) {
+        int page = -1;
+        for (int p = CFS_FIRST; p < pages; p++) {
+            const uint8_t *c = cfs_block(flash, len, p);
+            if ((c[0] & 0x80) && (int)be16(c + 2) == id && be16(c + 4) == part) {
+                page = p;
+                break;
+            }
+        }
+        if (page < 0)
+            return false;
+        uint8_t *b = flash + (size_t)page * CFS_PAGE + CFS_HEAD;
+        uint8_t *data = b + (part == 0 ? 78 : 6);
+        size_t k = b[1];
+        if (part == 0 && k > 256 - 78) k = 256 - 78;
+        if (part != 0 && k > 256 - 6) k = 256 - 6;
+        bool changed = false;
+        for (size_t i = 0; i < k; i++)
+            if (total + i >= at && total + i < at + n) {
+                data[i] = src[total + i - at];
+                done++;
+                changed = true;
+            }
+        if (changed)
+            cfs_seal(flash + (size_t)page * CFS_PAGE);
+        total += k;
+    }
+    return true;
+}
+
 /* ---- CyOS's serial console ---- */
 
 enum { RB_CON_OP_CMD = 1, RB_CON_OP_PUT, RB_CON_OP_REBOOT };
